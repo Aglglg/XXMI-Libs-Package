@@ -931,12 +931,45 @@ bail:
 	return false;
 }
 
+// Use case in section, example:
+// -------------------------
+// [ShaderOverrideSomething]
+// if $something == 1
+//		return = 1
+// endif
+// hash = abcdefghijk
+// handling = skip
+// -------------------------
+// lines after return in that section is ignored 
+class ReturnCommand : public CommandListCommand {
+public:
+	std::wstring ini_line;
+	std::wstring ini_section;
+
+	ReturnCommand(const wchar_t* section) {
+		ini_section = section;
+	}
+
+	void run(CommandListState* state) override {
+		COMMAND_LIST_LOG(state, "%S\n", ini_line.c_str());
+		state->aborted = true;  // Stop running further commands in this list
+	}
+
+	bool noop(bool post, bool ignore_cto_pre, bool ignore_cto_post) override {
+		return false;
+	}
+};
+
 bool ParseCommandListGeneralCommands(const wchar_t *section,
 		const wchar_t *key, wstring *val,
 		CommandList *explicit_command_list,
 		CommandList *pre_command_list, CommandList *post_command_list,
 		const wstring *ini_namespace)
 {
+	if (!wcscmp(key, L"return")) {
+		return AddCommandToList(new ReturnCommand(section), explicit_command_list, nullptr, pre_command_list, post_command_list, section, key, val);
+	}
+
 	if (!wcscmp(key, L"checktextureoverride"))
 		return ParseCheckTextureOverride(section, key, val, explicit_command_list, pre_command_list, post_command_list, ini_namespace);
 
