@@ -514,12 +514,6 @@ static void ParseIniKeyValLine(wstring *wline, wstring *section,
 		return;
 	}
 
-	// To accept 'return' in command list without any value
-	if (wline->compare(L"return") == 0) {
-		key = L"return";
-		val = L"1";  // any value
-	}
-
 	// Key / Val pair
 	delim = wline->find(L"=");
 	if (delim != wline->npos) {
