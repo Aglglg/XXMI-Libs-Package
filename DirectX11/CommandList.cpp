@@ -5243,6 +5243,25 @@ bail:
 	return false;
 }
 
+static bool ParseManagerIfCommand(const wchar_t *section, const wstring *line,
+		CommandList *pre_command_list, CommandList *post_command_list,
+		const wstring *ini_namespace)
+{
+	ManagerIfCommand *operation = new ManagerIfCommand(section);
+	wstring expression = line->substr(line->find_first_not_of(L" \t", 11));
+
+	if (!operation->expression.parse(&expression, ini_namespace, pre_command_list->scope))
+		goto bail;
+
+	// New scope level to isolate local variables:
+	pre_command_list->scope->emplace_front();
+
+	return AddCommandToList(operation, NULL, NULL, pre_command_list, post_command_list, section, line->c_str(), NULL);
+bail:
+	delete operation;
+	return false;
+}
+
 static bool ParseElseIfCommand(const wchar_t *section, const wstring *line, int prefix,
 		CommandList *pre_command_list, CommandList *post_command_list,
 		const wstring *ini_namespace)
@@ -5266,6 +5285,29 @@ bail:
 	return false;
 }
 
+static bool ParseManagerElseIfCommand(const wchar_t* section, const wstring* line, int prefix,
+	CommandList* pre_command_list, CommandList* post_command_list,
+	const wstring* ini_namespace)
+{
+	ManagerElseIfCommand* operation = new ManagerElseIfCommand(section);
+	wstring expression = line->substr(line->find_first_not_of(L" \t", prefix));
+
+	if (!operation->expression.parse(&expression, ini_namespace, pre_command_list->scope))
+		goto bail;
+
+	// Clear deepest scope level to isolate local variables:
+	pre_command_list->scope->front().clear();
+
+	// "else if" is implemented by nesting another if/endif inside the
+	// parent if command's else clause. We add both an ElsePlaceholder and
+	// an ElseIfCommand here, and will fix up the "endif" balance later.
+	AddCommandToList(new ManagerElsePlaceholder(), NULL, NULL, pre_command_list, post_command_list, section, line->c_str(), NULL);
+	return AddCommandToList(operation, NULL, NULL, pre_command_list, post_command_list, section, line->c_str(), NULL);
+bail:
+	delete operation;
+	return false;
+}
+
 static bool ParseElseCommand(const wchar_t *section,
 		CommandList *pre_command_list, CommandList *post_command_list, const wstring* ini_namespace)
 {
@@ -5273,6 +5315,15 @@ static bool ParseElseCommand(const wchar_t *section,
 	pre_command_list->scope->front().clear();
 
 	return AddCommandToList(new ElsePlaceholder(), NULL, NULL, pre_command_list, post_command_list, section, L"else", NULL);
+}
+
+static bool ParseManagerElseCommand(const wchar_t* section,
+	CommandList* pre_command_list, CommandList* post_command_list, const wstring* ini_namespace)
+{
+	// Clear deepest scope level to isolate local variables:
+	pre_command_list->scope->front().clear();
+
+	return AddCommandToList(new ManagerElsePlaceholder(), NULL, NULL, pre_command_list, post_command_list, section, L"manager_else", NULL);
 }
 
 static bool _ParseEndIfCommand(const wchar_t *section,
@@ -5341,6 +5392,73 @@ static bool _ParseEndIfCommand(const wchar_t *section,
 	return false;
 }
 
+static bool _ParseManagerEndIfCommand(const wchar_t* section,
+	CommandList* command_list, const wstring* ini_namespace, bool post, bool has_nested_else_if = false)
+{
+	CommandList::Commands::reverse_iterator rit;
+	ManagerIfCommand* manager_if_command;
+	ManagerElseIfCommand* manager_else_if_command;
+	ManagerElsePlaceholder* manager_else_command = NULL;
+	CommandList::Commands::iterator manager_else_pos = command_list->commands.end();
+
+	for (rit = command_list->commands.rbegin(); rit != command_list->commands.rend(); rit++) {
+		manager_else_command = dynamic_cast<ManagerElsePlaceholder*>(rit->get());
+		if (manager_else_command) {
+			// C++ gotcha: reverse_iterator::base() points to the *next* element
+			manager_else_pos = rit.base() - 1;
+		}
+
+		manager_if_command = dynamic_cast<ManagerIfCommand*>(rit->get());
+		if (manager_if_command) {
+			// "else if" is treated as embedding another "if" block
+			// in the else clause of the first "if" command. The
+			// ElsePlaceholder was already inserted when the
+			// ElseIfCommand was parsed, and this ElseIfCommand acts
+			// as the nested IfCommand so the below code works as
+			// is, but to balance the endifs we will need to repeat
+			// this function until we find the original IfCommand:
+			manager_else_if_command = dynamic_cast<ManagerElseIfCommand*>(rit->get());
+
+			// Transfer the commands since the if command until the
+			// endif into the if command's true/false lists
+			if (post && !manager_if_command->post_finalised) {
+				// C++ gotcha: reverse_iterator::base() points to the *next* element
+				manager_if_command->true_commands_post->commands.assign(rit.base(), manager_else_pos);
+				manager_if_command->true_commands_post->ini_section = manager_if_command->ini_line;
+				if (manager_else_pos != command_list->commands.end()) {
+					// Discard the else placeholder command:
+					manager_if_command->false_commands_post->commands.assign(manager_else_pos + 1, command_list->commands.end());
+					manager_if_command->false_commands_post->ini_section = manager_if_command->ini_line + L" <manager_else>";
+				}
+				command_list->commands.erase(rit.base(), command_list->commands.end());
+				manager_if_command->post_finalised = true;
+				manager_if_command->has_nested_manager_else_if = has_nested_else_if;
+				if (manager_else_if_command)
+					return _ParseManagerEndIfCommand(section, command_list, ini_namespace, post, true);
+				return true;
+			}
+			else if (!post && !manager_if_command->pre_finalised) {
+				// C++ gotcha: reverse_iterator::base() points to the *next* element
+				manager_if_command->true_commands_pre->commands.assign(rit.base(), manager_else_pos);
+				manager_if_command->true_commands_pre->ini_section = manager_if_command->ini_line;
+				if (manager_else_pos != command_list->commands.end()) {
+					// Discard the else placeholder command:
+					manager_if_command->false_commands_pre->commands.assign(manager_else_pos + 1, command_list->commands.end());
+					manager_if_command->false_commands_pre->ini_section = manager_if_command->ini_line + L" <manager_else>";
+				}
+				command_list->commands.erase(rit.base(), command_list->commands.end());
+				manager_if_command->pre_finalised = true;
+				manager_if_command->has_nested_manager_else_if = has_nested_else_if;
+				if (manager_else_if_command)
+					return _ParseManagerEndIfCommand(section, command_list, ini_namespace, post, true);
+				return true;
+			}
+		}
+	}
+	LogOverlayW(LOG_WARNING, L"Statement \"manager_endif\" missing \"manager_if\"\n - [%ls] @ [%ls]\n", section, ini_namespace);
+	return false;
+}
+
 static bool ParseEndIfCommand(const wchar_t *section,
 		CommandList *pre_command_list, CommandList *post_command_list, const wstring* ini_namespace)
 {
@@ -5356,18 +5474,47 @@ static bool ParseEndIfCommand(const wchar_t *section,
 	return ret;
 }
 
+static bool ParseManagerEndIfCommand(const wchar_t* section,
+	CommandList* pre_command_list, CommandList* post_command_list, const wstring* ini_namespace)
+{
+	bool ret;
+
+	ret = _ParseManagerEndIfCommand(section, pre_command_list, ini_namespace, false);
+	if (post_command_list)
+		ret = ret && _ParseManagerEndIfCommand(section, post_command_list, ini_namespace, true);
+
+	if (ret)
+		pre_command_list->scope->pop_front();
+
+	return ret;
+}
+
 bool ParseCommandListFlowControl(const wchar_t *section, const wstring *line,
 		CommandList *pre_command_list, CommandList *post_command_list,
 		const wstring *ini_namespace)
 {
+	if (!wcsncmp(line->c_str(), L"manager_if ", 11))
+		return ParseManagerIfCommand(section, line, pre_command_list, post_command_list, ini_namespace);
 	if (!wcsncmp(line->c_str(), L"if ", 3))
 		return ParseIfCommand(section, line, pre_command_list, post_command_list, ini_namespace);
+
+	if (!wcsncmp(line->c_str(), L"manager_elif ", 13))
+		return ParseManagerElseIfCommand(section, line, 13, pre_command_list, post_command_list, ini_namespace);
 	if (!wcsncmp(line->c_str(), L"elif ", 5))
 		return ParseElseIfCommand(section, line, 5, pre_command_list, post_command_list, ini_namespace);
+
+	if (!wcsncmp(line->c_str(), L"manager_else if ", 16))
+		return ParseManagerElseIfCommand(section, line, 16, pre_command_list, post_command_list, ini_namespace);
 	if (!wcsncmp(line->c_str(), L"else if ", 8))
 		return ParseElseIfCommand(section, line, 8, pre_command_list, post_command_list, ini_namespace);
+
+	if (!wcscmp(line->c_str(), L"manager_else"))
+		return ParseManagerElseCommand(section, pre_command_list, post_command_list, ini_namespace);
 	if (!wcscmp(line->c_str(), L"else"))
 		return ParseElseCommand(section, pre_command_list, post_command_list, ini_namespace);
+
+	if (!wcscmp(line->c_str(), L"manager_endif"))
+		return ParseManagerEndIfCommand(section, pre_command_list, post_command_list, ini_namespace);
 	if (!wcscmp(line->c_str(), L"endif"))
 		return ParseEndIfCommand(section, pre_command_list, post_command_list, ini_namespace);
 
@@ -5394,6 +5541,42 @@ IfCommand::IfCommand(const wchar_t *section) :
 	true_commands_post->ini_section = L"if placeholder";
 	false_commands_pre->ini_section = L"else placeholder";
 	false_commands_post->ini_section = L"else placeholder";
+
+	// Place the dynamically allocated command lists in this data structure
+	// to ensure they stay alive until after the optimisation stage, even
+	// if the IfCommand is freed, e.g. by being optimised out:
+	dynamically_allocated_command_lists.push_back(true_commands_pre);
+	dynamically_allocated_command_lists.push_back(true_commands_post);
+	dynamically_allocated_command_lists.push_back(false_commands_pre);
+	dynamically_allocated_command_lists.push_back(false_commands_post);
+
+	// And register these command lists for later optimisation:
+	registered_command_lists.push_back(true_commands_pre.get());
+	registered_command_lists.push_back(true_commands_post.get());
+	registered_command_lists.push_back(false_commands_pre.get());
+	registered_command_lists.push_back(false_commands_post.get());
+}
+
+ManagerIfCommand::ManagerIfCommand(const wchar_t* section) :
+	pre_finalised(false),
+	post_finalised(false),
+	has_nested_manager_else_if(false),
+	section(section)
+{
+	true_commands_pre = std::make_shared<CommandList>();
+	true_commands_post = std::make_shared<CommandList>();
+	false_commands_pre = std::make_shared<CommandList>();
+	false_commands_post = std::make_shared<CommandList>();
+	true_commands_post->post = true;
+	false_commands_post->post = true;
+
+	// Placeholder names to be replaced by endif processing - we should
+	// never see these, but in case they do show up somewhere these will
+	// provide a clue as to what they are:
+	true_commands_pre->ini_section = L"manager_if placeholder";
+	true_commands_post->ini_section = L"manager_if placeholder";
+	false_commands_pre->ini_section = L"manager_else placeholder";
+	false_commands_post->ini_section = L"manager_else placeholder";
 
 	// Place the dynamically allocated command lists in this data structure
 	// to ensure they stay alive until after the optimisation stage, even
@@ -5438,7 +5621,41 @@ void IfCommand::run(CommandListState *state)
 	}
 }
 
+void ManagerIfCommand::run(CommandListState* state)
+{
+	if (expression.evaluate(state)) {
+		COMMAND_LIST_LOG(state, "%S: true {\n", ini_line.c_str());
+		state->extra_indent++;
+		if (state->post)
+			_RunCommandList(true_commands_post.get(), state, false);
+		else
+			_RunCommandList(true_commands_pre.get(), state, false);
+		state->extra_indent--;
+		COMMAND_LIST_LOG(state, "} manager_endif\n");
+	}
+	else {
+		COMMAND_LIST_LOG(state, "%S: false\n", ini_line.c_str());
+		if (!has_nested_manager_else_if) {
+			COMMAND_LIST_LOG(state, "[%S] manager_else {\n", section.c_str());
+			state->extra_indent++;
+		}
+		if (state->post)
+			_RunCommandList(false_commands_post.get(), state, false);
+		else
+			_RunCommandList(false_commands_pre.get(), state, false);
+		if (!has_nested_manager_else_if) {
+			state->extra_indent--;
+			COMMAND_LIST_LOG(state, "} manager_endif\n");
+		}
+	}
+}
+
 bool IfCommand::optimise(HackerDevice *device)
+{
+	return expression.optimise(device);
+}
+
+bool ManagerIfCommand::optimise(HackerDevice* device)
 {
 	return expression.optimise(device);
 }
@@ -5459,6 +5676,33 @@ bool IfCommand::noop(bool post, bool ignore_cto_pre, bool ignore_cto_post)
 			false_commands_pre->clear();
 			false_commands_post->clear();
 		} else {
+			true_commands_pre->clear();
+			true_commands_post->clear();
+		}
+	}
+
+	if (post)
+		return true_commands_post->commands.empty() && false_commands_post->commands.empty();
+	return true_commands_pre->commands.empty() && false_commands_pre->commands.empty();
+}
+
+bool ManagerIfCommand::noop(bool post, bool ignore_cto_pre, bool ignore_cto_post)
+{
+	float static_val;
+	bool is_static;
+
+	if ((post && !post_finalised) || (!post && !pre_finalised)) {
+		LogOverlayW(LOG_WARNING, L"Statement \"manager_if\" missing \"manager_endif\":\n - \"%ls\"\n", ini_line.c_str());
+		return true;
+	}
+
+	is_static = expression.static_evaluate(&static_val);
+	if (is_static) {
+		if (static_val) {
+			false_commands_pre->clear();
+			false_commands_post->clear();
+		}
+		else {
 			true_commands_pre->clear();
 			true_commands_post->clear();
 		}

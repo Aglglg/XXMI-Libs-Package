@@ -1018,11 +1018,43 @@ public:
 	bool noop(bool post, bool ignore_cto_pre, bool ignore_cto_post) override;
 };
 
+class ManagerIfCommand : public CommandListCommand {
+public:
+	CommandListExpression expression;
+	bool pre_finalised, post_finalised;
+	bool has_nested_manager_else_if;
+	wstring section;
+
+	// Commands cannot statically contain command lists, because the
+	// command may be optimised out and the command list freed while we are
+	// still in the middle of optimisations. These are dynamically
+	// allocated, and also stored in a second data structure until
+	// optimisations are complete
+	std::shared_ptr<CommandList> true_commands_pre;
+	std::shared_ptr<CommandList> true_commands_post;
+	std::shared_ptr<CommandList> false_commands_pre;
+	std::shared_ptr<CommandList> false_commands_post;
+
+	ManagerIfCommand(const wchar_t* section);
+
+	void run(CommandListState*) override;
+	bool optimise(HackerDevice* device) override;
+	bool noop(bool post, bool ignore_cto_pre, bool ignore_cto_post) override;
+};
+
 class ElseIfCommand : public IfCommand {
 public:
 	ElseIfCommand(const wchar_t *section) :
 		IfCommand(section)
 	{}
+};
+
+class ManagerElseIfCommand : public ManagerIfCommand {
+public:
+	ManagerElseIfCommand(const wchar_t* section) :
+		ManagerIfCommand(section)
+	{
+	}
 };
 
 class CommandPlaceholder : public CommandListCommand {
@@ -1031,6 +1063,8 @@ public:
 	bool noop(bool post, bool ignore_cto_pre, bool ignore_cto_post) override;
 };
 class ElsePlaceholder : public CommandPlaceholder {
+};
+class ManagerElsePlaceholder : public CommandPlaceholder {
 };
 
 class CheckTextureOverrideCommand : public CommandListCommand {
