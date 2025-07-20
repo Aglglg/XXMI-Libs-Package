@@ -1,5 +1,5 @@
 ### Modified by Aglglg
-- Only for very niche use case (used with [No Reload Mod Manager Custom Lib Version](https://github.com/Aglglg/XXMI-Libs-Package))
+- Only for very niche use case (used with [No Reload Mod Manager Custom Lib Version](https://github.com/Aglglg/No-Reload-Mod-Manager/tree/for-custom-xxmi-lib))
 - Not intended for wide use and only for personal usage or if someone reached to me to try it
 - Build using github actions (thanks to SpectrumQT)
 #### What changed?
