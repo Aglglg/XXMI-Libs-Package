@@ -2,6 +2,8 @@
 - Only for very niche use case (used with [No Reload Mod Manager Custom Lib Version](https://github.com/Aglglg/XXMI-Libs-Package))
 - Not intended for wide use and only for personal usage or if someone reached to me to try it
 - Build using github actions (thanks to SpectrumQT)
+#### What changed?
+- Background/foreground check now using `target` and or `manager` if specified in `[Loader]`
 ---
 
 ![image](https://cloud.githubusercontent.com/assets/6544511/22624161/934dba64-eb27-11e6-8f78-46c902e96e1b.png)
