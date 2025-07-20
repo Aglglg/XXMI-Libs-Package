@@ -1,3 +1,7 @@
+### Modified by Aglglg
+- Not intended for wide use and only for personal usage or if someone reached to me to try it
+- Build using github actions (thanks to SpectrumQT)
+  
 ![image](https://cloud.githubusercontent.com/assets/6544511/22624161/934dba64-eb27-11e6-8f78-46c902e96e1b.png)
 ========
 
