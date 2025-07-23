@@ -1718,11 +1718,13 @@ void find_texture_overrides_for_resource(ID3D11Resource *resource, TextureOverri
 	D3D11_TEXTURE3D_DESC tex3d_desc;
 
 	find_texture_override_for_resource_by_hash(resource, matches, call_info);
-	if (!matches->empty()) {
-		// If we got a result it was matched by hash - that's an exact
-		// match and we don't process any fuzzy matches
-		return;
-	}
+
+	// Allow fuzzy matches to be processed even when exact matches exist
+	//if (!matches->empty()) {
+	//	// If we got a result it was matched by hash - that's an exact
+	//	// match and we don't process any fuzzy matches
+	//	return;
+	//}
 
 	resource->GetType(&dimension);
 	switch (dimension) {
