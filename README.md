@@ -4,6 +4,7 @@
 - Build using github actions (thanks to SpectrumQT)
 #### What changed?
 - Background/foreground check now using `target` and or `manager` if specified in `[Loader]`
+- Added `manager_if-manager_endif` to avoid mod cannot be managed/overlapped because there's an error in default conditional syntax. With this, [No Reload Mod Manager Custom Lib Version](https://github.com/Aglglg/No-Reload-Mod-Manager/tree/for-custom-xxmi-lib) no need to use the force fix algorithm.
 ---
 
 ![image](https://cloud.githubusercontent.com/assets/6544511/22624161/934dba64-eb27-11e6-8f78-46c902e96e1b.png)
