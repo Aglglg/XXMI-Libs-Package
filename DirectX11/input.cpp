@@ -1,6 +1,5 @@
 #include "Input.h"
 
-#include <psapi.h>
 #include <Xinput.h>
 #include <vector>
 #include <algorithm>
@@ -530,43 +529,23 @@ void ClearKeyBindings()
 	actions.clear();
 }
 
-bool isForegroundProcess(const std::wstring& processName) {
-    HWND hwnd = GetForegroundWindow();
-    
-	if (hwnd == NULL) {
-        return false;
-    }
-    
-	DWORD processId = 0;
-    
-	GetWindowThreadProcessId(hwnd, &processId);
-    
-	HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
-    
-	if (hProcess == NULL) {
-        return false;
-    }
-    
-	wchar_t processPath[MAX_PATH];
-    
-	if (GetModuleFileNameExW(hProcess, NULL, processPath, MAX_PATH) == 0) {
-        CloseHandle(hProcess);
-        return false;
-    }
-    
-	CloseHandle(hProcess);
-    
-	std::wstring processPathStr(processPath);
-    
-	size_t pos = processPathStr.find_last_of(L'\\');
-    
-	if (pos == std::wstring::npos) {
-        return false;
-    }
+static bool IsForegroundManagerTitle(HWND hwnd)
+{
+	wchar_t expectedTitle[512] = { 0 };
 
-    std::wstring executableName = processPathStr.substr(pos + 1);
-    
-	return executableName == processName;
+	if (!GetIniString(L"Loader", L"Manager", nullptr,
+		expectedTitle, _countof(expectedTitle)))
+		return false;
+
+	if (!expectedTitle[0])
+		return false;
+
+	wchar_t title[512] = { 0 };
+
+	if (!GetWindowTextW(hwnd, title, _countof(title)))
+		return false;
+
+	return wcsstr(_wcslwr(title), _wcslwr(expectedTitle)) != nullptr;
 }
 
 static bool CheckForegroundWindow()
@@ -574,24 +553,18 @@ static bool CheckForegroundWindow()
 	if (!G->check_foreground_window)
 		return true;
 
-	wchar_t target[MAX_PATH];
-	wchar_t manager[MAX_PATH];
+	HWND hwnd = GetForegroundWindow();
+	if (!hwnd)
+		return false;
 
-	bool hasTarget = GetIniString(L"Loader", L"Target", NULL, target, MAX_PATH) != 0;
-	bool hasManager = GetIniString(L"Loader", L"Manager", NULL, manager, MAX_PATH) != 0;
+	DWORD pid = 0;
+	GetWindowThreadProcessId(hwnd, &pid);
 
-	// If neither key is found, allow by default
-	if (!hasTarget && !hasManager)
+	if (pid == GetCurrentProcessId())
 		return true;
 
-	// Check if current foreground process matches either
-	if (hasTarget && isForegroundProcess(target))
-		return true;
-
-	if (hasManager && isForegroundProcess(manager))
-		return true;
-
-	return false;
+	// Additional manager window by title
+	return IsForegroundManagerTitle(hwnd);
 }
 
 bool DispatchInputEvents(HackerDevice *device)
