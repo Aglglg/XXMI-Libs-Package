@@ -10,5 +10,5 @@
 
 #### What changed?
 - Background/foreground check now using `target` and or `manager` if specified in `[Loader]`
-- Added `manager_if-manager_endif` to avoid mod cannot be managed/overlapped because there's an error in default conditional syntax.
+- Added `manager_if-manager_endif` to avoid mod cannot be managed/overlapped because there's an error in default conditional syntax (not really used since default NRMM is already smart enough).
 ---
