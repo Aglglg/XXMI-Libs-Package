@@ -29,6 +29,7 @@
     <ClCompile Include="lock.cpp" />
     <ClCompile Include="cursor.cpp" />
     <ClCompile Include="Override.cpp" />
+    <ClCompile Include="manager_mark.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="d3d11Wrapper.def" />

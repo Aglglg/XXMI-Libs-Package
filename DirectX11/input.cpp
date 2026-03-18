@@ -529,16 +529,42 @@ void ClearKeyBindings()
 	actions.clear();
 }
 
+static bool IsForegroundManagerTitle(HWND hwnd)
+{
+	wchar_t expectedTitle[512] = { 0 };
+
+	if (!GetIniString(L"Loader", L"Manager", nullptr,
+		expectedTitle, _countof(expectedTitle)))
+		return false;
+
+	if (!expectedTitle[0])
+		return false;
+
+	wchar_t title[512] = { 0 };
+
+	if (!GetWindowTextW(hwnd, title, _countof(title)))
+		return false;
+
+	return wcsstr(_wcslwr(title), _wcslwr(expectedTitle)) != nullptr;
+}
+
 static bool CheckForegroundWindow()
 {
-	DWORD pid;
-
 	if (!G->check_foreground_window)
 		return true;
 
-	GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+	HWND hwnd = GetForegroundWindow();
+	if (!hwnd)
+		return false;
 
-	return (pid == GetCurrentProcessId());
+	DWORD pid = 0;
+	GetWindowThreadProcessId(hwnd, &pid);
+
+	if (pid == GetCurrentProcessId())
+		return true;
+
+	// Additional manager window by title
+	return IsForegroundManagerTitle(hwnd);
 }
 
 bool DispatchInputEvents(HackerDevice *device)
