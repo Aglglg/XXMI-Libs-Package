@@ -529,6 +529,18 @@ void ClearKeyBindings()
 	actions.clear();
 }
 
+static bool IsModManagerWindow(HWND hwnd)
+{
+	if (G->modManagerWindowTitle.empty())
+		return false;
+
+	wchar_t title[512] = { 0 };
+	if (!GetWindowTextW(hwnd, title, _countof(title)))
+		return false;
+
+	return wcscmp(title, G->modManagerWindowTitle.c_str()) == 0;
+}
+
 static bool CheckForegroundWindow()
 {
 	DWORD pid;
@@ -536,9 +548,17 @@ static bool CheckForegroundWindow()
 	if (!G->check_foreground_window)
 		return true;
 
-	GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+	HWND hwnd = GetForegroundWindow();
+	if (!hwnd)
+		return false;
 
-	return (pid == GetCurrentProcessId());
+	GetWindowThreadProcessId(hwnd, &pid);
+
+	if (pid == GetCurrentProcessId())
+		return true;
+
+	// Additional mod manager window by title
+	return IsModManagerWindow(hwnd);
 }
 
 bool DispatchInputEvents(HackerDevice *device)

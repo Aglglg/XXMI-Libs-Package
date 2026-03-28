@@ -4452,6 +4452,9 @@ void LoadConfigFile()
 	if (GetIniStringAndLog(L"Rendering", L"fix_MatrixOperand1Multiplier", 0, setting, MAX_PATH))
 		G->decompiler_settings.MatrixPos_MUL1 = readStringParameter(setting);
 
+	if (GetIniString(L"Loader", L"manager", nullptr, setting, MAX_PATH))
+		G->modManagerWindowTitle = setting;
+
 	// [Hunting]
 	ParseHuntingSection();
 

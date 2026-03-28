@@ -61,6 +61,7 @@
     <ClCompile Include="IniHandler.cpp" />
     <ClCompile Include="Input.cpp" />
     <ClCompile Include="lock.cpp" />
+    <ClCompile Include="export_mark.cpp" />
     <ClCompile Include="Overlay.cpp" />
     <ClCompile Include="Override.cpp" />
     <ClCompile Include="profiling.cpp" />
