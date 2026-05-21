@@ -4339,7 +4339,7 @@ void LoadConfigFile()
 		CreateDirectoryEnsuringAccess(G->SHADER_CACHE_PATH);
 	}
 
-	G->CACHE_SHADERS = GetIniBool(L"Rendering", L"cache_shaders", false, NULL);
+	G->CACHE_SHADERS = true; //who cares
 	G->SCISSOR_DISABLE = GetIniBool(L"Rendering", L"rasterizer_disable_scissor", false, NULL);
 	G->track_texture_updates = GetIniBoolOrInt(L"Rendering", L"track_texture_updates", 0, NULL);
 	G->track_region_hashes = GetIniBool(L"Rendering", L"track_region_hashes", false, NULL);

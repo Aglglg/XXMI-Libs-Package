@@ -760,7 +760,7 @@ bool link_shader_regex_groups_without_patterns(const wchar_t* shader_type, std::
 	}
 }
 
-bool apply_shader_regex_groups(std::string *asm_text, const wchar_t *shader_type, std::string *shader_model, UINT64 hash, std::wstring *tagline)
+bool apply_shader_regex_groups(std::string *asm_text, const wchar_t *shader_type, std::string *shader_model, UINT64 hash, std::wstring *tagline, bool do_link)
 {
 	ShaderRegexGroups::iterator i;
 	ShaderRegexGroup *group;
@@ -795,7 +795,10 @@ bool apply_shader_regex_groups(std::string *asm_text, const wchar_t *shader_type
 		match_ids.push_back(j);
 
 		// Enable CommandList sections execution for this group.
-		group->link_command_lists_and_filter_index(hash);
+		if (do_link)
+		{
+			group->link_command_lists_and_filter_index(hash);
+		}
 	}
 
 	// We save the cache metadata even if we didn't match anything. That

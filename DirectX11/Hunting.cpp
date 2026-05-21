@@ -1032,7 +1032,7 @@ static void CopyToFixes(UINT64 hash, HackerDevice *device)
 				wstring tagline(L"// MANUALLY DUMPED ");
 				bool patched = false;
 				try {
-					patched = apply_shader_regex_groups(&asmText, iter.second.shaderType.c_str(), &iter.second.shaderModel, hash, &tagline);
+					patched = apply_shader_regex_groups(&asmText, iter.second.shaderType.c_str(), &iter.second.shaderModel, hash, &tagline, true);
 				} catch (...) {
 					LogOverlay(LOG_WARNING, "Exception while patching shader\n");
 				}

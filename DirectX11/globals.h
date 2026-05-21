@@ -117,6 +117,7 @@ struct OriginalShaderInfo
 	bool deferred_replacement_candidate;
 	bool deferred_replacement_processed;
 	std::wstring infoText;
+	bool async_pending = false;
 };
 
 // Call this after any CreateXXXShader call to ensure that all references to
