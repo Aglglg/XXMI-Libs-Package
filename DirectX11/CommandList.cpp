@@ -18,6 +18,7 @@
 #include "cursor.h"
 
 #include <D3DCompiler.h>
+#include <thread>
 
 CustomResources customResources;
 CustomShaders customShaders;
@@ -4236,8 +4237,11 @@ void CustomResource::Substantiate(ID3D11Device *mOrigDevice1,
 	LockResourceCreationMode();
 
 	if (!filename.empty()) {
-		LoadFromFile(mOrigDevice1);
-	} else {
+		std::thread([this, mOrigDevice1]() {
+			LoadFromFile(mOrigDevice1);
+			}).detach();
+	}
+	else {
 		switch (override_type) {
 			case CustomResourceType::BUFFER:
 			case CustomResourceType::STRUCTURED_BUFFER:
