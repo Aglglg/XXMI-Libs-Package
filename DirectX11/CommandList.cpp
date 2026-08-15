@@ -1676,9 +1676,86 @@ void StoreCommand::run(CommandListState* state)
 		return;
 	}
 
+	D3D11_BUFFER_DESC src_desc = {};
+	static_cast<ID3D11Buffer*>(src_resource)->GetDesc(&src_desc);
+
+	const bool is_structured = (src_desc.MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED) != 0;
+
+	const UINT value_index = offset_expression->evaluate(state);
+	const UINT value_size = sizeof(float);
+
+	// StoreCommand historically treats the source as a flat sequence of 4-byte values.
+	// The requested offset is therefore a value index, regardless of whether the underlying buffer is structured.
+	const UINT64 value_byte_offset = static_cast<UINT64>(value_index) * value_size;
+
+	UINT64 copy_offset = 0;
+	UINT64 copy_size = 0;
+	UINT value_offset = 0;
+
+	if (is_structured)
+	{
+		const UINT stride = src_desc.StructureByteStride;
+
+		if (stride == 0)
+		{
+			var->fval = 0.0f;
+			src_resource->Release();
+			return;
+		}
+
+		// CopySubresourceRegion requires a structured-buffer copy region to contain complete structure elements.
+		// Find the first structure touched by the requested value.
+		const UINT64 first_struct_offset = (value_byte_offset / stride) * stride;
+
+		// The requested value occupies [value_byte_offset, value_end_offset).
+		const UINT64 value_end_offset = value_byte_offset + value_size;
+
+		// Round the end of the requested value up to a structure boundary.
+		// This allows the requested 4-byte value to span multiple structures
+		// when StructureByteStride is smaller than sizeof(float).
+		const UINT64 copy_end_offset = ((value_end_offset + stride - 1) / stride) * stride;
+
+		// Copy whole structures, potentially more than one, while retaining
+		// the requested value's byte offset within the copied staging data.
+		copy_offset = first_struct_offset;
+		copy_size = copy_end_offset - first_struct_offset;
+		value_offset = static_cast<UINT>(value_byte_offset - first_struct_offset);
+	}
+	else
+	{
+		// Non-structured buffers have no structure-alignment restriction,
+		// so only the requested 4-byte value needs to be copied.
+		copy_offset = value_byte_offset;
+		copy_size = value_size;
+		value_offset = 0;
+	}
+
+	// Make sure the complete source copy region is inside the buffer.
+	if (copy_offset + copy_size > src_desc.ByteWidth)
+	{
+		var->fval = 0.0f;
+		src_resource->Release();
+		return;
+	}
+
+	// Copy the requested float into the staging buffer for CPU readback.
+	D3D11_BOX box = {};
+	box.left = static_cast<UINT>(copy_offset);
+	box.right = static_cast<UINT>(copy_offset + copy_size);
+	box.top = 0;
+	box.bottom = 1;
+	box.front = 0;
+	box.back = 1;
+
 	// Acquire a cached staging buffer. Buffers are pooled by size and reused
 	// across calls to avoid repeated CreateBuffer() overhead.
-	ID3D11Buffer* staging = mHackerContext->GetReadbackBuffer(sizeof(float));
+	//
+	// The staging buffer is always a linear CPU-readable buffer. It does not
+	// need to be structured even when the source buffer is structured.
+	//
+	// Its size is the complete copy region, which may contain multiple
+	// structures when the requested value crosses a structure boundary.
+	ID3D11Buffer* staging = mHackerContext->GetReadbackBuffer(copy_size);
 
 	if (!staging)
 	{
@@ -1687,17 +1764,7 @@ void StoreCommand::run(CommandListState* state)
 		return;
 	}
 
-	UINT offset = offset_expression->evaluate(state);
-
-	// Copy the requested float into the staging buffer for CPU readback.
-	D3D11_BOX box = {};
-	box.left = offset * sizeof(float);
-	box.right = box.left + sizeof(float);
-	box.top = 0;
-	box.bottom = 1;
-	box.front = 0;
-	box.back = 1;
-
+	// Copy the complete source region into the CPU-readable staging buffer.
 	mOrigContext1->CopySubresourceRegion(staging, 0, 0, 0, 0, src_resource, 0, &box);
 
 	// Map the staging buffer so the copied value can be read by the CPU.
@@ -1712,8 +1779,14 @@ void StoreCommand::run(CommandListState* state)
 		return;
 	}
 
-	// Read the value before unmapping, as the mapped pointer becomes invalid once Unmap() is called.
-	var->fval = *reinterpret_cast<float*>(map.pData);
+	// The staging buffer starts at copy_offset in the source resource.
+	// value_offset points from the beginning of the staging buffer to the
+	// requested 4-byte value.
+	const uint8_t* data = static_cast<const uint8_t*>(map.pData);
+
+	// Read the value before Unmap(), since the mapped pointer becomes
+	// invalid after the staging resource is unmapped.
+	var->fval = *reinterpret_cast<const float*>(value_offset + data);
 
 	mOrigContext1->Unmap(staging, 0);
 
@@ -1965,18 +2038,34 @@ void Draw3DMigotoOverlayCommand::run(CommandListState *state)
 
 void CopyCommandListCommand::run(CommandListState* state)
 {
-	if (failed)
-		return;
+	// Operation enters "failed" state when recursively resolved SRC root is DST.
+	// It allows to bail on cyclic reference to avoid runtime overhead from warnings spam.
+	if (failed_root) {
+		if (src && failed_root != src->command_list.ResolveCommandList())
+			failed_root = nullptr;  // Recover from "failed" state if SRC root changed.
+		else
+			return;
+	}
 
 	COMMAND_LIST_LOG(state, "%S\n", ini_line.c_str());
 
 	if (!dst->command_list.SetSourceCommandList(src ? &src->command_list : nullptr)) {
-		failed = true;
+		if (!src) {
+			assert(false); // Should never happen.
+			return;
+		}
+		// Cyclic reference encountered. Enter "failed" state.
+		failed_root = src->command_list.ResolveCommandList();
 		return;
 	}
 
 	if (!dst->post_command_list.SetSourceCommandList(src ? &src->post_command_list : nullptr)) {
-		failed = true;
+		if (!src) {
+			assert(false); // Should never happen.
+			return;
+		}
+		// Cyclic reference encountered. Enter "failed" state.
+		failed_root = src->command_list.ResolveCommandList();  // Both pre and post are synced.
 		return;
 	}
 }
@@ -2865,7 +2954,8 @@ float CommandListOperand::process_shader_filter(CommandListState *state)
 	HackerContext *mHackerContext = state->mHackerContext;
 	ID3D11DeviceChild *shader = NULL;
 
-	switch (shader_filter_target) {
+	switch (shader_target.shader_type)
+	{
 		case L'v':
 			shader = mHackerContext->mCurrentVertexShaderHandle;
 			break;
@@ -2885,29 +2975,84 @@ float CommandListOperand::process_shader_filter(CommandListState *state)
 			shader = mHackerContext->mCurrentComputeShaderHandle;
 			break;
 		default:
-			LogOverlay(LOG_DIRE, "BUG: Unknown shader filter type: \"%C\"\n", shader_filter_target);
+			LogOverlay(LOG_DIRE, "BUG: Unknown shader filter type: \"%C\"\n", shader_target.shader_type);
 			break;
 	}
 
-	// Negative zero means no shader bound:
 	if (!shader)
-		return -0.0;
+		return -0.0;  // Negative zero means no shader bound.
 
 	ShaderMap::iterator shader_it = lookup_shader_hash(shader);
 
 	if (shader_it == G->mShaders.end())
 		return 0.0;
 
-	// Positive zero means shader bound with no ShaderOverride
-	ShaderOverrideMap::iterator override = lookup_shaderoverride(shader_it->second);
-	if (override == G->mShaderOverrideMap.end())
-		return 0.0;
+	if (shader_target.evaluation_mode == ShaderTargetEvaluationMode::SHADER)
+	{
+		ShaderOverrideMap::iterator override = lookup_shaderoverride(shader_it->second);
+		if (override == G->mShaderOverrideMap.end())
+			return 0.0;  // Positive zero means shader bound with no ShaderOverride.
 
-	if (override->second.filter_index != FLT_MAX)
-		return override->second.filter_index;
+		if (override->second.filter_index != FLT_MAX)
+			return override->second.filter_index;
 
-	// Matched ShaderOverride / ShaderRegex, but no filter_index:
-	return 1.0;
+		return 1.0;  // Matched ShaderOverride / ShaderRegex, but no filter_index.
+	}
+
+	//LogDebug("ShaderTarget Member Evaluation hash=%016I64x\n", shader_it->second);
+
+	auto it = G->mShaderBindingsCache.find(shader_it->second);
+	if (it == G->mShaderBindingsCache.end()) {
+		assert(false);
+		return 0.0;  // Safety check, should never happen;
+	}
+
+	UINT slot_id = (UINT)shader_target.member_args[0].GetValue(state);
+
+	switch (shader_target.evaluation_mode)
+	{
+	case ShaderTargetEvaluationMode::DCL_CB_TYPE:
+	{
+		ShaderConstantBuffer& cb = it->second.constant_buffers[slot_id];
+
+		return (float)cb.type;
+	}
+	case ShaderTargetEvaluationMode::DCL_CB_SIZE:
+	{
+		ShaderConstantBuffer& cb = it->second.constant_buffers[slot_id];
+
+		if (cb.type == ShaderConstantBufferType::NONE)
+			return -1.0;  // Negative one means CB is not declared for this slot.
+
+		return (float)cb.size;
+	}
+	case ShaderTargetEvaluationMode::DCL_SRV_TYPE:
+	{
+		ShaderResource& t = it->second.resources[slot_id];
+
+		return (float)t.type;
+	}
+	case ShaderTargetEvaluationMode::DCL_SRV_STRIDE:
+	{
+		ShaderResource& t = it->second.resources[slot_id];
+
+		if (t.type == ShaderResourceType::NONE)
+			return -1.0;  // Negative one means SRV is not declared for this slot.
+
+		return (float)t.stride;
+	}
+	case ShaderTargetEvaluationMode::DCL_SRV_DIMENSION:
+	{
+		ShaderResource& t = it->second.resources[slot_id];
+
+		if (t.type == ShaderResourceType::NONE)
+			return -1.0;  // Negative one means SRV is not declared for this slot.
+
+		return (float)t.dimension;
+	}
+	}
+	
+	return 0.0;
 }
 
 void CommandList::clear()
@@ -3641,6 +3786,10 @@ static inline bool is_operator_char(wchar_t c)
 	case L'!':
 	case L'^':
 	case L'~':
+	case L'(':
+	case L')':
+	case L'[':
+	case L']':
 		return true;
 
 	default:
@@ -4485,6 +4634,10 @@ static void tokenise(const wstring* expression, CommandListSyntaxTree* tree, con
 		if (!has_prefix)
 		{
 			len = FindIdentifierTokenEnd(remain, 0, OptionalChars::NONE);
+			
+			// Do not match identifiers followed by `->` (e.g. `vb0->stride`).
+			if (len && len + 1 < remain.size() && remain[len] == '-' && remain[len + 1] == '>')
+				len = 0;
 
 			if (len)
 			{
@@ -4547,19 +4700,17 @@ static void tokenise(const wstring* expression, CommandListSyntaxTree* tree, con
 				pos += len_target;
 				goto import_operand;
 			}
-		}
 
-		// Must be attempted after target, otherwise it'll win over slots (e.g. `vs` over `vs-cb0`).
-		if (!has_prefix && len)
-		{
-			token = remain.substr(0, len);
-
-			// Parse shader (e.g. `vs`, `cs`).
-			if (operand->parse_shader(&token, ini_namespace, scope))
+			// Must be attempted after target, otherwise it'll win over slots (e.g. `vs` over `vs-cb0`).
+			if (!has_prefix)
 			{
-				LogDebug("      Shader: \"%S\"\n", token.c_str());
-				pos += len;
-				goto import_operand;
+				// Parse shader (e.g. `vs`, `cs`).
+				if (operand->parse_shader(&token, ini_namespace, scope))
+				{
+					LogDebug("      Shader: \"%S\"\n", token.c_str());
+					pos += len_target;
+					goto import_operand;
+				}
 			}
 		}
 
@@ -5386,24 +5537,11 @@ bool CommandListOperand::parse_target(const wstring* operand, const wstring* ini
 
 bool CommandListOperand::parse_shader(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope)
 {
-	// WARNING: This test is especially susceptible to an uninitialised
-	//          %n fooling it into thinking it has parsed the entire string
-	//          if the stack garbage happens to contain operand->length().
-	//          This is because the %n does not immediately follow another
-	//          conversion specification and does not alter the return
-	//          value, so the return value will not distinguish between
-	//          early termination and completion, and since %lc will match
-	//          any character this can trigger easily. Seems to only occur
-	//          on vs2013, though I'm not positive if vs2017 zeroes out
-	//          len1 or dumb luck gave different values in the stack.
-	int len1 = 0;
-	int ret = swscanf_s(operand->c_str(), L"%lcs%n", &shader_filter_target, 1, &len1);
-	if (ret == 1 && len1 == operand->length()) {
-		switch (shader_filter_target) {
-		case L'v': case L'h': case L'd': case L'g': case L'p': case L'c':
-			type = ParamOverrideType::SHADER;
-			return operand_allowed_in_context(type, scope);
-		}
+	int ret;
+	ret = shader_target.ParseTarget(operand->c_str(), true, ini_namespace, scope);
+	if (ret) {
+		type = ParamOverrideType::SHADER;
+		return operand_allowed_in_context(type, scope);
 	}
 	return false;
 }
@@ -6713,15 +6851,19 @@ size_t CustomResourcePool::GetElementIndex(float id, bool use_ring_index, bool i
 
 			if (expiration_timeout_frames != UINT32_MAX)
 				PostponeExpiration(index_table[pool_index], is_assignment);
-		}
-		else
-		{
-			// Allocate next FIFO slot
-			pool_index = (last_replacement_index + 1) % pool_size;
-			last_replacement_index = pool_index;
 
-			AssignSlot(pool_index, key, is_assignment);
+			return pool_index;
 		}
+
+		// Prevent new slot allocation on read access when `allocate_slot_on_missing` is disabled.
+		if (!allocate_slot_on_missing && !is_assignment)
+			return SIZE_MAX;
+
+		// Allocate next FIFO slot
+		pool_index = (last_replacement_index + 1) % pool_size;
+		last_replacement_index = pool_index;
+
+		AssignSlot(pool_index, key, is_assignment);
 
 		return pool_index;
 	}
@@ -6745,78 +6887,90 @@ size_t CustomResourcePool::GetElementIndex(float id, bool use_ring_index, bool i
 
 			if (expiration_timeout_frames != UINT32_MAX)
 				PostponeExpiration(index_table[pool_index], is_assignment);
+
+			return pool_index;
+		}
+
+		// Slow path: no exact cell match.
+		// 
+		// Search existing slots for the nearest spatial cell within the allowed radius.
+		// This preserves resources for objects that moved only slightly between frames.
+		//
+		// Chebyshev distance is used because spatial cells form a square/cubic grid.
+		// It treats all cells inside a radius-N axis-aligned cube as equally close:
+		// 
+		//   distance = max(abs(a.x - b.x), abs(a.y - b.y), ...)
+		//
+		// Unlike Euclidean distance, diagonal movement does not cost more than
+		// axis-aligned movement, which matches grid-cell adjacency.
+		uint32_t closest_distance = UINT32_MAX;
+
+		size_t nearest_slot = SIZE_MAX;
+		size_t empty_slot = SIZE_MAX;
+
+		GridPos query_cell = UnpackCellCoords(spatial_hash);
+
+		for (size_t i = 0; i < index_table.size(); ++i)
+		{
+			PoolSlot& pool_slot = index_table[i];
+
+			if (pool_slot.key == UINT32_MAX)
+			{
+				// UINT32_MAX indicates an unused slot.
+				// Remember the first available slot for later use.
+				if (empty_slot == SIZE_MAX)
+					empty_slot = i;
+				continue;
+			}
+
+			GridPos slot_cell = UnpackCellCoords(pool_slot.key);
+
+			uint32_t d = SpatialDistanceChebyshev(query_cell, slot_cell);
+
+			if (d < closest_distance)
+			{
+				closest_distance = d;
+				nearest_slot = i;
+
+				// Defensive early-out. Exact matches are normally handled by index_map.
+				if (d == 0)
+					break;
+			}
+		}
+
+		// Existing nearby spatial entry is a valid lookup hit.
+		if (closest_distance <= spatial_radius && nearest_slot != SIZE_MAX)
+		{
+			// Reuse the slot belonging to the closest nearby spatial cell.
+			// This keeps resources stable when objects move within the radius.
+			pool_index = nearest_slot;
+
+			AssignSlot(pool_index, spatial_hash, is_assignment);
+
+			return pool_index;
+		}
+
+		// No cached resource matches this lookup.
+		// Prevent new slot allocation on read access when `allocate_slot_on_missing` is disabled.
+		if (!allocate_slot_on_missing && !is_assignment)
+			return SIZE_MAX;
+
+		// Normal allocation path.
+		if (empty_slot != SIZE_MAX)
+		{
+			// No nearby match found. Allocate an unused pool slot.
+			pool_index = empty_slot;
 		}
 		else
 		{
-			// Slow path: no exact cell match.
-			// 
-			// Search existing slots for the nearest spatial cell within the allowed radius.
-			// This preserves resources for objects that moved only slightly between frames.
-			//
-			// Chebyshev distance is used because spatial cells form a square/cubic grid.
-			// It treats all cells inside a radius-N axis-aligned cube as equally close:
-			// 
-			//   distance = max(abs(a.x - b.x), abs(a.y - b.y), ...)
-			//
-			// Unlike Euclidean distance, diagonal movement does not cost more than
-			// axis-aligned movement, which matches grid-cell adjacency.
-			uint32_t closest_distance = UINT32_MAX;
-
-			size_t nearest_slot = SIZE_MAX;
-			size_t empty_slot = SIZE_MAX;
-
-			GridPos query_cell = UnpackCellCoords(spatial_hash);
-
-			for (size_t i = 0; i < index_table.size(); ++i)
-			{
-				PoolSlot& pool_slot = index_table[i];
-
-				if (pool_slot.key == UINT32_MAX)
-				{
-					// UINT32_MAX indicates an unused slot.
-					// Remember the first available slot for later use.
-					if (empty_slot == SIZE_MAX)
-						empty_slot = i;
-					continue;
-				}
-
-				GridPos slot_cell = UnpackCellCoords(pool_slot.key);
-
-				uint32_t d = SpatialDistanceChebyshev(query_cell, slot_cell);
-
-				if (d < closest_distance)
-				{
-					closest_distance = d;
-					nearest_slot = i;
-
-					// Defensive early-out. Exact matches are normally handled by index_map.
-					if (d == 0)
-						break;
-				}
-			}
-
-			if (closest_distance <= spatial_radius && nearest_slot != SIZE_MAX)
-			{
-				// Reuse the slot belonging to the closest nearby spatial cell.
-				// This keeps resources stable when objects move within the radius.
-				pool_index = nearest_slot;
-			}
-			else if (empty_slot != SIZE_MAX)
-			{
-				// No nearby match found. Allocate an unused pool slot.
-				pool_index = empty_slot;
-			}
-			else
-			{
-				// Pool is full and no nearby slot is suitable.
-				// Evict the oldest slot using FIFO replacement order.
-				pool_index = (last_replacement_index + 1) % pool_size;
-				last_replacement_index = pool_index;
-			}
-
-			// Associate the selected slot with the new spatial cell.
-			AssignSlot(pool_index, spatial_hash, is_assignment);
+			// Pool is full and no nearby slot is suitable.
+			// Evict the oldest slot using FIFO replacement order.
+			pool_index = (last_replacement_index + 1) % pool_size;
+			last_replacement_index = pool_index;
 		}
+
+		// Associate the selected slot with the new spatial cell.
+		AssignSlot(pool_index, spatial_hash, is_assignment);
 
 		return pool_index;
 	}
@@ -6837,6 +6991,9 @@ CustomResource* CustomResourcePool::GetResource(float id, bool template_lookup, 
 		return resource_template;
 
 	size_t pool_index = GetElementIndex(id, use_ring_index, is_assignment);
+
+	if (pool_index == SIZE_MAX)
+		return resource_template;
 
 	PoolElement& element = elements[pool_index];
 
@@ -6861,6 +7018,9 @@ CommandListVariable* CustomResourcePool::GetVariable(float id, bool template_loo
 
 	size_t pool_index = GetElementIndex(id, use_ring_index, is_assignment);
 
+	if (pool_index == SIZE_MAX)
+		return variable_template.get();
+
 	PoolElement& element = elements[pool_index];
 
 	if (is_assignment)
@@ -6878,6 +7038,9 @@ unsigned CustomResourcePool::GetLastUpdateFrame(float id, bool use_ring_index)
 		return source_pool->GetLastUpdateFrame(id, use_ring_index);
 
 	size_t pool_index = GetElementIndex(id, use_ring_index, false);
+
+	if (pool_index == SIZE_MAX)
+		return 0;
 
 	PoolSlot& slot = index_table[pool_index];
 
@@ -7146,32 +7309,6 @@ void CustomResourcePool::ExpireElements()
 #pragma endregion CustomResourcePool
 
 
-#pragma region ParseResourceCopyTarget
-
-IniParserResult ResourceCopyTarget::ParseTargetPrefix(const wchar_t*& target, size_t& length)
-{
-	switch (target[0]) {
-	case L'$':
-		if ((target[length - 1] == L']') && !wcsncmp(target, L"$pool", 5)) {
-			evaluation_mode = ResourceCopyTargetEvaluationMode::VARIABLE;
-			target++;
-			length--;
-			return IniParserResult::TOKEN_FOUND;
-		}
-	case L'@':
-		evaluation_mode = ResourceCopyTargetEvaluationMode::RESOURCE_IDENTITY;
-		target++;
-		length--;
-		return IniParserResult::TOKEN_FOUND;
-	case L'#':
-		evaluation_mode = ResourceCopyTargetEvaluationMode::POOL_INDEX;
-		target++;
-		length--;
-		return IniParserResult::TOKEN_FOUND;
-	}
-	return IniParserResult::TOKEN_NOT_FOUND;
-}
-
 float MemberArg::GetValue(CommandListState* state)
 {
 	if (expression)
@@ -7185,13 +7322,96 @@ const std::wstring& MemberArg::GetString() const
 	return constant_string;
 }
 
-bool ResourceCopyTarget::ParseMemberArguments(
-	const MemberInfo& member, const wchar_t* args_start, const wchar_t* args_end, const wstring* ini_namespace, CommandListScope* scope
-)
+IniParserResult SyntaxTarget::extract_arguments(const wchar_t* target, size_t& length, const wchar_t*& args_start, const wchar_t*& args_end)
+{
+	args_start = nullptr;
+	args_end = nullptr;
+
+	if (length == 0 || target[length - 1] != L')')
+		return IniParserResult::TOKEN_NOT_FOUND;
+
+	const wchar_t* open = wcsrchr(target, L'(');
+
+	if (!open || open <= target)
+		return IniParserResult::SYNTAX_ERROR;
+
+	// Remove "(...)" from target.
+	args_start = open + 1;
+	args_end = target + length - 1;
+
+	length = open - target;
+
+	return IniParserResult::TOKEN_FOUND;
+}
+
+bool SyntaxTarget::suffix_equals(const wchar_t* str, size_t len, const wchar_t* suffix, size_t suffix_len)
+{
+	return len >= suffix_len && !wmemcmp(str + len - suffix_len, suffix, suffix_len);
+}
+
+template<typename Mode, size_t N>
+IniParserResult SyntaxTarget::ParseTargetMember(
+    const MemberInfo<Mode> (&members)[N],
+    const wchar_t*& target,
+    size_t& length,
+    wstring& temp_target,
+    Mode& evaluation_mode,
+    const wstring* ini_namespace,
+    CommandListScope* scope)
+{
+    const wchar_t* args_start = nullptr;
+    const wchar_t* args_end = nullptr;
+
+    IniParserResult args_result =
+        extract_arguments(target, length, args_start, args_end);
+
+    if (args_result == IniParserResult::SYNTAX_ERROR)
+        return IniParserResult::SYNTAX_ERROR;
+
+    for (const auto& member : members)
+    {
+        if (length < member.len + 2)
+            break;
+
+        const wchar_t* member_pos = target + length - member.len;
+
+        if (member_pos[1] != L'>')
+            continue;
+
+        if (!suffix_equals(target, length, member.keyword, member.len))
+            continue;
+
+        if (!ParseMemberArguments(
+                member,
+                args_start,
+                args_end,
+                ini_namespace,
+                scope))
+            return IniParserResult::SYNTAX_ERROR;
+
+        evaluation_mode = member.mode;
+
+        length -= member.len;
+
+        temp_target.assign(target, length);
+        target = temp_target.c_str();
+
+        return IniParserResult::TOKEN_FOUND;
+    }
+
+    return IniParserResult::TOKEN_NOT_FOUND;
+}
+
+template<typename Mode>
+bool SyntaxTarget::ParseMemberArguments(
+	const MemberInfo<Mode>& member,
+	const wchar_t* args_start,
+	const wchar_t* args_end,
+	const wstring* ini_namespace,
+	CommandListScope* scope)
 {
 	size_t num_args = member.num_args();
 
-	// No "(...)" present.
 	if (!args_start)
 		return num_args == 0;
 
@@ -7243,31 +7463,117 @@ bool ResourceCopyTarget::ParseMemberArguments(
 	return args.Finished();
 }
 
-IniParserResult extract_arguments(const wchar_t* target, size_t& length, const wchar_t*& args_start, const wchar_t*& args_end)
+IniParserResult ShaderTarget::ParseShaderPipelineSlot(const wchar_t*& target, size_t length, bool is_source)
 {
-	args_start = nullptr;
-	args_end = nullptr;
+	//LogInfo("ParseShaderPipelineSlot: target=%ls, length=%d, is_source=%d\n", target, length, is_source);
 
-	if (length == 0 || target[length - 1] != L')')
-		return IniParserResult::TOKEN_NOT_FOUND;
+	// WARNING: This test is especially susceptible to an uninitialised
+	//          %n fooling it into thinking it has parsed the entire string
+	//          if the stack garbage happens to contain operand->length().
+	//          This is because the %n does not immediately follow another
+	//          conversion specification and does not alter the return
+	//          value, so the return value will not distinguish between
+	//          early termination and completion, and since %lc will match
+	//          any character this can trigger easily. Seems to only occur
+	//          on vs2013, though I'm not positive if vs2017 zeroes out
+	//          len1 or dumb luck gave different values in the stack.
 
-	const wchar_t* open = wcsrchr(target, L'(');
+	int len1 = 0;
+	int ret = swscanf_s(target, L"%lcs%n", &shader_type, 1, &len1);
 
-	if (!open || open <= target)
-		return IniParserResult::SYNTAX_ERROR;
+	if (ret == 1 && len1 == length) {
+		switch (shader_type) {
+		case L'v': case L'h': case L'd': case L'g': case L'p': case L'c':
+			return IniParserResult::TOKEN_FOUND;
+		}
+	}
 
-	// Remove "(...)" from target.
-	args_start = open + 1;
-	args_end = target + length - 1;
-
-	length = open - target;
-
-	return IniParserResult::TOKEN_FOUND;
+	return IniParserResult::TOKEN_NOT_FOUND;
 }
 
-bool suffix_equals(const wchar_t* str, size_t len, const wchar_t* suffix, size_t suffix_len)
+bool ShaderTarget::ParseTarget(const wchar_t* target, bool is_source, const wstring* ini_namespace, CommandListScope* scope)
 {
-	return len >= suffix_len && !wmemcmp(str + len - suffix_len, suffix, suffix_len);
+	IniParserResult ret;
+	size_t length = wcslen(target);
+	std::wstring temp_target;
+
+	if (!target || length < 2)
+		return false;
+
+	//LogInfo("ShaderTarget::ParseTarget: `%ls` is_source=%d\n", target, is_source);
+
+	// Consume an optional member suffix.
+	ret = ParseTargetMember(target, length, temp_target, ini_namespace, scope);
+	//LogInfo("ParseTarget: %d at ParseTargetMember\n", ret);
+	if (ret == IniParserResult::SYNTAX_ERROR)
+		return false;
+
+	// Parse the remainder as a pipeline slot (e.g. `vs`, `ps`, `cs`).
+	ret = ParseShaderPipelineSlot(target, length, is_source);
+	//LogInfo("ParseTarget: %d at ParseTargetPipelineSlot\n", ret);
+	if (ret != IniParserResult::TOKEN_NOT_FOUND)
+		return ret == IniParserResult::TOKEN_FOUND;
+
+	//LogInfo("ParseTarget: 0 at END\n");
+	return false;
+}
+
+IniParserResult ShaderTarget::ParseTargetMember(
+	const wchar_t*& target, size_t& length, wstring& temp_target, const wstring* ini_namespace, CommandListScope* scope
+)
+{
+	//LogInfo("ShaderTarget::ParseTargetMember: target=%ls, length=%d\n", target, length);
+
+	if (length < 11) // Smallest possible match is "vs->cb_mask".
+		return IniParserResult::TOKEN_NOT_FOUND;
+
+	static constexpr MemberInfo members[] = {
+		{ L"->cb_mask",         9, ShaderTargetEvaluationMode::DCL_CB_MASK },
+		{ L"->cb_type",         9, ShaderTargetEvaluationMode::DCL_CB_TYPE, {{
+			MemberArg::Type::Unsigned, // Slot ID
+		}} },
+		{ L"->cb_size",         9, ShaderTargetEvaluationMode::DCL_CB_SIZE, {{
+			MemberArg::Type::Unsigned, // Slot ID
+		}} },
+		{ L"->srv_mask",       10, ShaderTargetEvaluationMode::DCL_SRV_MASK },
+		{ L"->srv_type",       10, ShaderTargetEvaluationMode::DCL_SRV_TYPE, {{
+			MemberArg::Type::Unsigned, // Slot ID
+		}} },
+		{ L"->srv_stride",     12, ShaderTargetEvaluationMode::DCL_SRV_STRIDE, {{
+			MemberArg::Type::Unsigned, // Slot ID
+		}} },
+		{ L"->srv_dimension",  15, ShaderTargetEvaluationMode::DCL_SRV_DIMENSION, {{
+			MemberArg::Type::Unsigned, // Slot ID
+		}} },
+	};
+
+	return SyntaxTarget::ParseTargetMember(members, target, length, temp_target, evaluation_mode, ini_namespace, scope);
+}
+
+#pragma region ParseResourceCopyTarget
+
+IniParserResult ResourceCopyTarget::ParseTargetPrefix(const wchar_t*& target, size_t& length)
+{
+	switch (target[0]) {
+	case L'$':
+		if ((target[length - 1] == L']') && !wcsncmp(target, L"$pool", 5)) {
+			evaluation_mode = ResourceCopyTargetEvaluationMode::VARIABLE;
+			target++;
+			length--;
+			return IniParserResult::TOKEN_FOUND;
+		}
+	case L'@':
+		evaluation_mode = ResourceCopyTargetEvaluationMode::RESOURCE_IDENTITY;
+		target++;
+		length--;
+		return IniParserResult::TOKEN_FOUND;
+	case L'#':
+		evaluation_mode = ResourceCopyTargetEvaluationMode::POOL_INDEX;
+		target++;
+		length--;
+		return IniParserResult::TOKEN_FOUND;
+	}
+	return IniParserResult::TOKEN_NOT_FOUND;
 }
 
 IniParserResult ResourceCopyTarget::ParseTargetMember(
@@ -7313,45 +7619,7 @@ IniParserResult ResourceCopyTarget::ParseTargetMember(
 		}} },
 	};
 
-	// Consume (...) arguments contents (adjust `length` accordingly). Ensure syntax error passthrough.
-	const wchar_t* args_start = nullptr;
-	const wchar_t* args_end = nullptr;
-	IniParserResult args_result = extract_arguments(target, length, args_start, args_end);
-	if (args_result == IniParserResult::SYNTAX_ERROR)
-		return IniParserResult::SYNTAX_ERROR;
-
-	// Consume member keyword (adjust `target` and `length` accordingly).
-	for (const auto& member : members)
-	{
-		// Members are listed by ASC length. Exit loop if target is shorter than current member length plus "ib" length of 2.
-		if (length < member.len + 2)
-			break;
-
-		// Skip to next member if ">" pointer is not found at expected pos (avoids unneeded "wmemcmp" calls).
-		const wchar_t* member_pos = target + length - member.len;
-		if (member_pos[1] != L'>')
-			continue;
-
-		// Check if the trailing end matches the member substr, "->" included.
-		if (!suffix_equals(target, length, member.keyword, member.len))
-			continue;
-
-		if (!ParseMemberArguments(member, args_start, args_end, ini_namespace, scope))
-			return IniParserResult::SYNTAX_ERROR;
-
-		// Member found.
-		evaluation_mode = member.mode;
-
-		length -= member.len;
-
-		temp_target.assign(target, length);
-		target = temp_target.c_str();
-
-		//LogInfo("ParseTargetMember: TOKEN_FOUND keyword=%ls, target=%ls\n", member.keyword, target);
-		return IniParserResult::TOKEN_FOUND;
-	}
-
-	return IniParserResult::TOKEN_NOT_FOUND;
+	return SyntaxTarget::ParseTargetMember(members, target, length, temp_target, evaluation_mode, ini_namespace, scope);
 }
 
 IniParserResult ResourceCopyTarget::ParseTargetCustomResource(const wchar_t*& target, size_t length, const wstring* ini_namespace, CommandListScope* scope)
@@ -7642,6 +7910,8 @@ bool ResourceCopyTarget::ParseTarget(const wchar_t *target, bool is_source, cons
 	if (!target || length < 2)
 		return false;
 
+	//LogInfo("ParseTarget: `%ls` allow_custom=%d, is_source=%d\n", target, allow_custom, is_source);
+
 	if (allow_custom)
 	{
 		// Consume an optional target prefix (`@` or `#` or `$`).
@@ -7709,7 +7979,7 @@ static CommandListCommand* parse_pool_copy_operation(
 			options |= ResourceCopyOptions::REFERENCE;
 		else if (options & ResourceCopyOptions::COPY) {
 			// Cannot use `copy` for pool to pool, only `ref` and `copy_desc` are supported.
-			LogOverlayW(LOG_WARNING, L"Cannot copy `%ls` to `%ls` (deep `copy` is not supported)\n - [% ls] @[% ls]\n", src.custom_resource_pool->name, dst.custom_resource_pool->name, section, ini_namespace->c_str());
+			LogOverlayW(LOG_WARNING, L"Cannot copy `%ls` to `%ls` (deep `copy` is not supported)\n - [% ls] @[% ls]\n", src.custom_resource_pool->name.c_str(), dst.custom_resource_pool->name.c_str(), section, ini_namespace->c_str());
 			return nullptr;
 		}
 		src.custom_resource_pool->PropagateFlags(dst.custom_resource_pool->resource_template->bind_flags, dst.custom_resource_pool->resource_template->misc_flags);
@@ -7733,24 +8003,27 @@ static CommandListCommand* parse_pool_copy_operation(
 
 void PoolCopyOperation::CopyPoolToPool(CommandListState* state)
 {
-	if (failed)
-		return;
+	// Operation enters "failed" state when recursively resolved SRC root is DST.
+	// It allows to bail on cyclic reference to avoid runtime overhead from warnings spam.
+	if (failed_root) {
+		if (src.custom_resource_pool && failed_root != src.custom_resource_pool->ResolvePool())
+			failed_root = nullptr;  // Recover from "failed" state if SRC root changed.
+		else
+			return;
+	}
+
 	if (options & ResourceCopyOptions::COPY_MASK)
 	{
 		if (options & ResourceCopyOptions::COPY_DESC) {
 			COMMAND_LIST_LOG(state, "  copying pool metadata\n");
 			dst.custom_resource_pool->CopyMetadataFrom(*src.custom_resource_pool);
 		}
-		else {
-			//COMMAND_LIST_LOG(state, "  performing deep pool copy\n");
-			LogOverlayW(LOG_NOTICE, L"Failed to copy `%ls` to `%ls` (deep copy not supported)\n", src.custom_resource_pool->name.c_str(), dst.custom_resource_pool->name.c_str());
-			failed = true;
-		}
 	}
 	else {
 		COMMAND_LIST_LOG(state, "  copying pool by reference\n");
 		if (!dst.custom_resource_pool->SetSourcePool(src.custom_resource_pool)) {
-			failed = true;
+			// Cyclic reference encountered. Enter "failed" state.
+			failed_root = src.custom_resource_pool->ResolvePool();
 		}
 	}
 }
@@ -8130,7 +8403,8 @@ bool ParseCommandListResourceCopyTargetDirective(
 
 		if (dst.type == ResourceCopyTargetType::POOL)
 		{
-			if (src.type == ResourceCopyTargetType::POOL) // PoolFoo = ref PoolBar
+			if (src.type == ResourceCopyTargetType::POOL      // PoolFoo = ref PoolBar
+				|| src.type == ResourceCopyTargetType::EMPTY) // PoolFoo = null
 			{
 				// Pool - Copy Pool To Pool (`ref` and `copy_desc`)
 				operation = parse_pool_copy_operation(section, dst, src, options, command_list, ini_namespace);
