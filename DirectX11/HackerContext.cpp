@@ -665,9 +665,9 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 			t_total_end - t_total_start
 		).count();
 
-		if (elapsed_ms > 5)
+		if (elapsed_ms > 5 && G->show_regex_info)
 		{
-			LogOverlayW(LOG_PURPLE, L"No Cache ShaderRegex %ls: %lld ms for %016llx\n", tagline.c_str(), std::chrono::duration_cast<std::chrono::milliseconds>(t_total_end - t_total_start).count(), hash);
+			LogOverlayW(LOG_PURPLE, L"No Cache ShaderRegex %ls: %lld ms for %016llx (Toggle with RIGHT ALT) \n", tagline.c_str(), std::chrono::duration_cast<std::chrono::milliseconds>(t_total_end - t_total_start).count(), hash);
 		}
 	}
 

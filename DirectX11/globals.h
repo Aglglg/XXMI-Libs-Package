@@ -413,6 +413,7 @@ struct Globals
 	DWORD ticks_at_launch;
 	std::wstring additionalForegroundWindowTitle;
 	const std::wstring gDefaultNamespace = L"d3dx.ini";
+	bool show_regex_info;
 
 	wchar_t SHADER_PATH[MAX_PATH];
 	wchar_t SHADER_CACHE_PATH[MAX_PATH];
@@ -715,6 +716,7 @@ struct Globals
 		ZBufferHashToInject(0),
 		SCISSOR_DISABLE(0),
 
+		show_regex_info(false),
 		load_library_redirect(2),
 		enable_hooks(EnableHooks::INVALID),
 		enable_check_interface(false),

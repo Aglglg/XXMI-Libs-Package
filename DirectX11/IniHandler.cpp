@@ -4342,6 +4342,13 @@ static void ForceFullScreen(HackerDevice *device, void *private_data)
 	swap_chain->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH);
 }
 
+static void ToggleRegexInfo(HackerDevice* device, void* private_data)
+{
+	G->show_regex_info = !G->show_regex_info;
+	LPCWSTR status = G->show_regex_info ? L"ON" : L"OFF";
+	LogOverlayW(LOG_PURPLE, L"> REGEX INFO: %s (Toggle with RIGHT ALT)\n", status);
+}
+
 static void warn_of_conflicting_d3dx(wchar_t *dll_ini_path)
 {
 	wchar_t exe_ini_path[MAX_PATH];
@@ -4702,6 +4709,8 @@ void LoadConfigFile()
 
 	if (GetIniString(L"System", L"additional_foreground_window", nullptr, setting, MAX_PATH))
 		G->additionalForegroundWindowTitle = setting;
+
+	RegisterIniKeyBinding(L"Logging", L"toggle_regex_info", ToggleRegexInfo, NULL, 0, NULL);
 
 	// [Hunting]
 	ParseHuntingSection();
