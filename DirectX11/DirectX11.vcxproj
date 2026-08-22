@@ -42,6 +42,7 @@
     <ClCompile Include="..\D3D_Shaders\Assembler.cpp" />
     <ClCompile Include="..\D3D_Shaders\SignatureParser.cpp" />
     <ClCompile Include="..\HLSLDecompiler\DecompileHLSL.cpp" />
+    <ClCompile Include="ByteCodeReader.cpp" />
     <ClCompile Include="CommandList.cpp" />
     <ClCompile Include="..\iid.cpp" />
     <ClCompile Include="..\ini_parser_lite.cpp" />
@@ -53,6 +54,7 @@
     <ClCompile Include="HackerContext.cpp" />
     <ClCompile Include="HackerDevice.cpp" />
     <ClCompile Include="HackerDXGI.cpp" />
+    <ClCompile Include="HackerInputLayout.cpp" />
     <ClCompile Include="HookAddresses.c" />
     <ClCompile Include="HookedContext.cpp" />
     <ClCompile Include="HookedDevice.cpp" />
@@ -77,7 +79,9 @@
     <ClInclude Include="..\shader.h" />
     <ClInclude Include="..\util.h" />
     <ClInclude Include="..\version.h" />
+    <ClInclude Include="ByteCodeReader.h" />
     <ClInclude Include="cursor.h" />
+    <ClInclude Include="d3d11TokenizedProgramFormat.hpp" />
     <ClInclude Include="D3D11Wrapper.h" />
     <ClInclude Include="DLLMainHook.h" />
     <ClInclude Include="FrameAnalysis.h" />
@@ -85,6 +89,7 @@
     <ClInclude Include="HackerContext.h" />
     <ClInclude Include="HackerDevice.h" />
     <ClInclude Include="HackerDXGI.h" />
+    <ClInclude Include="HackerInputLayout.h" />
     <ClInclude Include="HookedContext.h" />
     <ClInclude Include="HookedDevice.h" />
     <ClInclude Include="HookedDXGI.h" />

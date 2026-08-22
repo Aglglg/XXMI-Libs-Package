@@ -50,6 +50,7 @@ private:
 
 	HackerContext *mHackerContext;
 	HackerSwapChain *mHackerSwapChain;
+	std::unordered_map<uint64_t, HackerInputLayout*> mInputLayoutCache;
 
 	// Utility routines
 	char *_ReplaceShaderFromShaderFixes(UINT64 hash, const wchar_t *shaderType, const void *pShaderBytecode,
@@ -108,6 +109,10 @@ private:
 		/* [annotation] */
 		__out_opt  ID3D11Shader **ppShader,
 		wchar_t *shaderType);
+
+	HackerInputLayout* FindCachedInputLayout(uint64_t hash);
+	void CacheInputLayout(uint64_t hash, HackerInputLayout* layout);
+	void ClearInputLayoutCache();
 
 public:
 	ID3D11Device1* mOrigDevice1;
@@ -221,6 +226,26 @@ public:
 		_In_  SIZE_T BytecodeLength,
 		/* [annotation] */
 		_Out_opt_  ID3D11InputLayout **ppInputLayout);
+
+	HRESULT HackerDevice::CreateInputLayoutInternal(
+		const D3D11_INPUT_ELEMENT_DESC* pInputElementDescs,
+		UINT NumElements,
+		const void* pShaderBytecodeWithInputSignature,
+		SIZE_T BytecodeLength,
+		uint64_t hash,
+		HackerInputLayout** ppLayout);
+
+	HRESULT STDMETHODCALLTYPE CreateCustomInputLayout(
+		/* [annotation] */
+		_In_reads_(NumElements)  const D3D11_INPUT_ELEMENT_DESC* pInputElementDescs,
+		/* [annotation] */
+		_In_range_(0, D3D11_IA_VERTEX_INPUT_STRUCTURE_ELEMENT_COUNT)  UINT NumElements,
+		/* [annotation] */
+		_In_  const void* pShaderBytecodeWithInputSignature,
+		/* [annotation] */
+		_In_  SIZE_T BytecodeLength,
+		/* [annotation] */
+		_Out_opt_  ID3D11InputLayout** ppInputLayout);
 
 	HRESULT STDMETHODCALLTYPE CreateVertexShader(
 		/* [annotation] */

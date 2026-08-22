@@ -475,9 +475,17 @@ bool RegisterIniKeyBinding(LPCWSTR app, LPCWSTR iniKey,
 	shared_ptr<InputCallbacks> callbacks = make_shared<InputCallbacks>(down_cb, up_cb, private_data);
 	wchar_t keyName[MAX_PATH];
 
+	//hardcoded for now
+	if (wcscmp(app, L"Logging") == 0 && wcscmp(iniKey, L"toggle_regex_info") == 0)
+	{
+		wcscpy_s(keyName, MAX_PATH, L"RALT");
+		goto skip;
+	}
+
 	if (!GetIniString(app, iniKey, 0, keyName, MAX_PATH))
 		return false;
 
+skip:
 	RegisterKeyBinding(iniKey, keyName, callbacks, auto_repeat, 0, 0);
 	return true;
 }

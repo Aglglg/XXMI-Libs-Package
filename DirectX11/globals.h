@@ -15,6 +15,7 @@
 #include "DecompileHLSL.h"
 
 #include "ResourceHash.h"
+#include "ShaderRegex.h"
 #include "CommandList.h"
 #include "profiling.h"
 #include "lock.h"
@@ -406,10 +407,13 @@ struct Globals
 	bool gLogInput;
 	bool gShowWarnings;
 	bool dump_all_profiles;
+	unsigned gSystemTickCount;
 	float gTime;
 	float gSettingsSaveTime;
 	DWORD ticks_at_launch;
 	std::wstring additionalForegroundWindowTitle;
+	const std::wstring gDefaultNamespace = L"d3dx.ini";
+	bool show_regex_info;
 
 	wchar_t SHADER_PATH[MAX_PATH];
 	wchar_t SHADER_CACHE_PATH[MAX_PATH];
@@ -589,6 +593,9 @@ struct Globals
 
 	std::unordered_map<UINT64, ShaderModelCacheEntry> mShaderModelCache;
 
+	CRITICAL_SECTION mShaderBindingsLock;
+	std::unordered_map<UINT64, ShaderBindings> mShaderBindingsCache;
+
 	unordered_map<uint32_t, TextureOverrideFuzzyMatches> mTextureOverrideDrawIndexMap;  // Contains hash+TextureOverrides pairs indexed by match_index_count
 	unordered_map<uint32_t, TextureOverrideFuzzyMatches> mTextureOverrideDrawVertexMap; // Contains hash+TextureOverrides pairs indexed by match_vertex_count
 
@@ -728,6 +735,7 @@ struct Globals
 		ZBufferHashToInject(0),
 		SCISSOR_DISABLE(0),
 
+		show_regex_info(false),
 		load_library_redirect(2),
 		enable_hooks(EnableHooks::INVALID),
 		enable_check_interface(false),
@@ -748,6 +756,7 @@ struct Globals
 		gFallbackScreenWidth(0),
 		gFallbackScreenHeight(0),
 		dump_all_profiles(false),
+		gSystemTickCount(0),
 		gTime(0)
 	{
 		int i;

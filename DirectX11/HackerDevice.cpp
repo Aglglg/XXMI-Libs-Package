@@ -33,6 +33,7 @@
 #include "ShaderRegex.h"
 #include "CommandList.h"
 #include "Hunting.h"
+#include "ByteCodeReader.h"
 
 // A map to look up the HackerDevice from an IUnknown. The reason for using an
 // IUnknown as the key is that an ID3D11Device and IDXGIDevice are actually two
@@ -390,6 +391,54 @@ void HackerDevice::CreatePinkHuntingResources()
 	}
 }
 
+HackerInputLayout* HackerDevice::FindCachedInputLayout(uint64_t hash)
+{
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+
+	auto it = mInputLayoutCache.find(hash);
+
+	if (it == mInputLayoutCache.end()) {
+		LeaveCriticalSection(&G->mCriticalSection);
+		return nullptr;
+	}
+
+	HackerInputLayout* layout = it->second;
+	layout->AddRef();
+
+	LeaveCriticalSection(&G->mCriticalSection);
+
+	return layout;
+}
+
+void HackerDevice::CacheInputLayout(uint64_t hash, HackerInputLayout* layout)
+{
+	if (!layout)
+		return;
+
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+
+	auto result = mInputLayoutCache.emplace(hash, layout);
+
+	if (result.second)
+		layout->AddRef();
+
+	LeaveCriticalSection(&G->mCriticalSection);
+}
+
+void HackerDevice::ClearInputLayoutCache()
+{
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+
+	auto cache = std::move(mInputLayoutCache);
+
+	LeaveCriticalSection(&G->mCriticalSection);
+
+	for (auto& entry : cache)
+	{
+		if (entry.second)
+			entry.second->Release();
+	}
+}
 
 // With the addition of full DXGI support, this init sequence is too dangerous
 // to do at object creation time.  The NV CreateHandleFromIUnknown calls back
@@ -1481,6 +1530,8 @@ STDMETHODIMP_(ULONG) HackerDevice::Release(THIS)
 			LogInfo("HackerDevice::Release counter=%d, this=%p\n", ulRef, this);
 		LogInfo("  deleting self\n");
 
+		ClearInputLayoutCache();
+
 		unregister_hacker_device(this);
 
 		if (mIniResourceView)
@@ -1545,7 +1596,7 @@ HRESULT STDMETHODCALLTYPE HackerDevice::QueryInterface(
 	HRESULT hr = mOrigDevice1->QueryInterface(riid, ppvObject);
 	if (FAILED(hr))
 	{
-		LogInfo("  failed result = %x for %p\n", hr, ppvObject);
+		LogDebug("  failed result = %x for %p\n", hr, ppvObject);
 		return hr;
 	}
 
@@ -1664,6 +1715,111 @@ STDMETHODIMP HackerDevice::CreateDepthStencilView(THIS_
 	return mOrigDevice1->CreateDepthStencilView(pResource, pDesc, ppDepthStencilView);
 }
 
+HRESULT HackerDevice::CreateInputLayoutInternal(
+	const D3D11_INPUT_ELEMENT_DESC* pInputElementDescs,
+	UINT NumElements,
+	const void* pShaderBytecodeWithInputSignature,
+	SIZE_T BytecodeLength,
+	uint64_t hash,
+	HackerInputLayout** ppLayout)
+{
+	if (!ppLayout)
+		return E_INVALIDARG;
+
+	*ppLayout = nullptr;
+
+	ID3D11InputLayout* orig = nullptr;
+	HRESULT hr = mOrigDevice1->CreateInputLayout(pInputElementDescs, NumElements, pShaderBytecodeWithInputSignature, BytecodeLength, &orig);
+
+	if (FAILED(hr))
+	{
+		LogDebug("  Native CreateInputLayout failed: result=%x orig=%p\n", hr, orig);
+		return hr;
+	}
+
+	if (SUCCEEDED(hr) && !orig)
+	{
+		LogDebug("  Native CreateInputLayout returned success with null layout\n");
+		return E_FAIL;
+	}
+
+	try
+	{
+		auto* layout = new HackerInputLayout(orig, pInputElementDescs, NumElements, pShaderBytecodeWithInputSignature, BytecodeLength, hash);
+
+		orig = nullptr;
+		*ppLayout = layout;
+
+		LogDebug("  New input layout handle=%p hash=%016llx\n", layout, hash);
+		return S_OK;
+	}
+	catch (const std::bad_alloc&)
+	{
+		LogDebug("  EXCEPTION: std::bad_alloc creating input layout (NumElements=%u BytecodeLength=%zu hash=%016llx orig=%p)\n",
+			NumElements, BytecodeLength, hash, orig);
+		orig->Release();
+		return E_OUTOFMEMORY;
+	}
+	catch (const std::exception& e)
+	{
+		LogDebug("  EXCEPTION: %s creating input layout (NumElements=%u BytecodeLength=%zu hash=%016llx orig=%p)\n",
+			e.what(), NumElements, BytecodeLength, hash, orig);
+		orig->Release();
+		return E_FAIL;
+	}
+	catch (...)
+	{
+		LogDebug("  EXCEPTION: unknown exception creating input layout (NumElements=%u BytecodeLength=%zu hash=%016llx orig=%p)\n",
+			NumElements, BytecodeLength, hash, orig);
+		orig->Release();
+		return E_FAIL;
+	}
+}
+
+STDMETHODIMP HackerDevice::CreateCustomInputLayout(THIS_
+	/* [annotation] */
+	__in_ecount(NumElements)  const D3D11_INPUT_ELEMENT_DESC *pInputElementDescs,
+	/* [annotation] */
+	__in_range(0, D3D11_IA_VERTEX_INPUT_STRUCTURE_ELEMENT_COUNT)  UINT NumElements,
+	/* [annotation] */
+	__in  const void *pShaderBytecodeWithInputSignature,
+	/* [annotation] */
+	__in  SIZE_T BytecodeLength,
+	/* [annotation] */
+	__out_opt  ID3D11InputLayout **ppInputLayout)
+{
+	LogDebug("HackerDevice::CreateCustomInputLayout(%s@%p) called ppInputLayout=%p pShaderSignature=%p BytecodeLength=%zu\n",
+		type_name(this), this, ppInputLayout, pShaderBytecodeWithInputSignature, BytecodeLength);
+
+	if (!ppInputLayout)
+		return E_INVALIDARG;
+
+	*ppInputLayout = nullptr;
+
+	const uint64_t hash = CalculateInputLayoutHash(pInputElementDescs, NumElements, pShaderBytecodeWithInputSignature, BytecodeLength);
+
+	HackerInputLayout* cached = FindCachedInputLayout(hash);
+
+	if (cached)
+	{
+		*ppInputLayout = cached;
+		LogDebug("  Cached custom layout handle=%p hash=%016llx\n", cached, hash);
+		return S_OK;
+	}
+
+	HackerInputLayout* layout = nullptr;
+	HRESULT hr = CreateInputLayoutInternal(pInputElementDescs, NumElements, pShaderBytecodeWithInputSignature, BytecodeLength, hash, &layout);
+
+	if (FAILED(hr))
+		return hr;
+
+	CacheInputLayout(hash, layout);
+	*ppInputLayout = layout;
+
+	LogDebug("  New custom layout handle=%p hash=%016llx\n", layout, hash);
+	return S_OK;
+}
+
 STDMETHODIMP HackerDevice::CreateInputLayout(THIS_
 	/* [annotation] */
 	__in_ecount(NumElements)  const D3D11_INPUT_ELEMENT_DESC *pInputElementDescs,
@@ -1676,31 +1832,24 @@ STDMETHODIMP HackerDevice::CreateInputLayout(THIS_
 	/* [annotation] */
 	__out_opt  ID3D11InputLayout **ppInputLayout)
 {
-	HRESULT ret;
-	ID3DBlob *blob;
+	LogDebug("HackerDevice::CreateInputLayout(%s@%p) called ppInputLayout=%p pShaderSignature=%p BytecodeLength=%zu\n",
+		type_name(this), this, ppInputLayout, pShaderBytecodeWithInputSignature, BytecodeLength);
 
-	ret = mOrigDevice1->CreateInputLayout(pInputElementDescs, NumElements, pShaderBytecodeWithInputSignature,
-		BytecodeLength, ppInputLayout);
-
-	if (G->hunting && SUCCEEDED(ret) && ppInputLayout && *ppInputLayout) {
-		// When dumping vertex buffers to text file in frame analysis
-		// we want to use the input layout to decode the buffer, but
-		// DirectX provides no API to query this. So, we store a copy
-		// of the input layout in a blob inside the private data of the
-		// input layout object. The private data is slow to access, so
-		// we should not use this in a hot path, but for frame analysis
-		// it doesn't matter. We use a blob to manage releasing the
-		// backing memory, since the anonymous void* version of this
-		// API does not appear to free the private data on release.
-
-		if (SUCCEEDED(D3DCreateBlob(sizeof(D3D11_INPUT_ELEMENT_DESC) * NumElements, &blob))) {
-			memcpy(blob->GetBufferPointer(), pInputElementDescs, blob->GetBufferSize());
-			(*ppInputLayout)->SetPrivateDataInterface(InputLayoutDescGuid, blob);
-			blob->Release();
-		}
+	if (!ppInputLayout)
+	{
+		// Preserve the native API's validation-only behavior.
+		return mOrigDevice1->CreateInputLayout(pInputElementDescs, NumElements, pShaderBytecodeWithInputSignature, BytecodeLength, nullptr);
 	}
 
-	return ret;
+	*ppInputLayout = nullptr;
+
+	HackerInputLayout* layout = nullptr;
+	HRESULT hr = CreateInputLayoutInternal(pInputElementDescs, NumElements, pShaderBytecodeWithInputSignature, BytecodeLength, 0, &layout);
+
+	if (SUCCEEDED(hr))
+		*ppInputLayout = layout;
+
+	return hr;
 }
 
 STDMETHODIMP HackerDevice::CreateClassLinkage(THIS_
@@ -2447,6 +2596,45 @@ fnv:
 	return hash;
 }
 
+static void CacheShaderBindings(uint64_t hash, const void* pShaderBytecode, SIZE_T BytecodeLength)
+{
+	{
+		CriticalSectionGuard(&G->mShaderBindingsLock);
+
+		if (G->mShaderBindingsCache.find(hash) != G->mShaderBindingsCache.end())
+		{
+			LogDebug("  Skipped parsing %016I64x shader bindings from bytecode (already cached).\n", hash);
+			return;
+		}
+	}
+
+	ShaderBindings bindings{};
+
+	const bool parsed = get_shader_bindings_from_bytecode( pShaderBytecode, BytecodeLength, &bindings);
+
+	{
+		CriticalSectionGuard(&G->mShaderBindingsLock);
+
+		// Another thread may have inserted it while we were parsing.
+		std::pair<std::unordered_map<uint64_t, ShaderBindings>::iterator, bool > result = G->mShaderBindingsCache.emplace(hash, std::move(bindings));
+
+		if (!result.second)
+		{
+			// Another thread won the race.
+			LogDebug("  Shader bindings %016I64x were cached concurrently.\n", hash);
+			return;
+		}
+
+		if (!parsed)
+		{
+			LogInfo("  Failed to parse %016I64x shader bindings from bytecode.\n", hash);
+		}
+		else
+		{
+			LogDebug("  Cached %016I64x shader bindings (parsed from bytecode).\n", hash);
+		}
+	}
+}
 
 // C++ function template of common code shared by all CreateXXXShader functions:
 template <class ID3D11Shader,
@@ -2477,6 +2665,18 @@ STDMETHODIMP HackerDevice::CreateShader(THIS_
 
 	// Calculate hash
 	hash = hash_shader(pShaderBytecode, BytecodeLength);
+
+	//constexpr int iterations = 10000;
+	//auto start = std::chrono::steady_clock::now();
+	//for (int i = 0; i < iterations; ++i)
+	//{
+	CacheShaderBindings(hash, pShaderBytecode, BytecodeLength);
+	//}
+	//auto end = std::chrono::steady_clock::now();
+	//const double total_ms = std::chrono::duration<double, std::milli>(end - start).count();
+	//const double avg_ns = total_ms * 1'000'000.0 / iterations;
+	//LogInfo("  CacheShaderBindings: %.2f ns/call (%.2f ms total, %d iterations)\n",
+	//	avg_ns, total_ms, iterations);
 
 	hr = ReplaceShaderFromShaderFixes<ID3D11Shader, OrigCreateShader>
 		(hash, pShaderBytecode, BytecodeLength, pClassLinkage,
