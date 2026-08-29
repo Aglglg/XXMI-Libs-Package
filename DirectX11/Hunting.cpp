@@ -1189,22 +1189,12 @@ static void ReloadFixes(HackerDevice *device, void *private_data)
 	}
 }
 
-static void DisableFix(HackerDevice *device, void *private_data)
+static void ToggleFix(HackerDevice *device, void *private_data)
 {
-	if (G->hunting != HUNTING_MODE_ENABLED)
-		return;
-
 	LogInfo("show_original pressed - switching to original shaders\n");
-	G->fix_enabled = false;
-}
-
-static void EnableFix(HackerDevice *device, void *private_data)
-{
-	if (G->hunting != HUNTING_MODE_ENABLED)
-		return;
-
-	LogInfo("show_original released - switching to replaced shaders\n");
-	G->fix_enabled = true;
+	G->fix_enabled = !G->fix_enabled;
+	LPCWSTR status = G->fix_enabled ? L"ON" : L"OFF";
+	LogOverlayW(LOG_PURPLE, L"> FIX/MOD: %s (Toggle with <key on show_original> or F9)\n", status);
 }
 
 static void _AnalyseFrameStop()
@@ -2050,7 +2040,7 @@ void ParseHuntingSection()
 
 	RegisterIniKeyBinding(L"Hunting", L"reload_fixes", ReloadFixes, NULL, noRepeat, NULL);
 
-	G->show_original_enabled = RegisterIniKeyBinding(L"Hunting", L"show_original", DisableFix, EnableFix, noRepeat, NULL);
+	G->show_original_enabled = RegisterIniKeyBinding(L"Hunting", L"show_original", ToggleFix, NULL, noRepeat, NULL);
 
 	G->frame_analysis_registered = RegisterIniKeyBinding(L"Hunting", L"analyse_frame", AnalyseFrame, AnalyseFrameStop, noRepeat, NULL);
 	if (GetIniStringAndLog(L"Hunting", L"analyse_options", 0, buf, MAX_PATH)) {
