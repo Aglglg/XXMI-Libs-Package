@@ -22,6 +22,14 @@
 
 extern HINSTANCE migoto_handle;
 
+static EnumName_t<const wchar_t*, LogVerbosity> LogVerbosityNames[] = {
+	{L"disabled", LogVerbosity::DISABLED},
+	{L"warning",  LogVerbosity::WARNING},
+	{L"info",     LogVerbosity::INFO},
+	{L"debug",    LogVerbosity::DEBUG},
+	{NULL,        LogVerbosity::INVALID} // End of list marker
+};
+
 // Resolve circular include dependency between Globals.h ->
 // CommandList.h -> HackerContext.h -> Globals.h
 class CommandListCommand;
@@ -396,6 +404,19 @@ struct ShaderModelCacheEntry {
 	std::string shaderModel;
 };
 
+enum class InputDisableScope: int8_t {
+	INVALID = -1,
+	NONE    = 0,
+	MODS    = 1,
+	ALL     = 2,
+};
+static EnumName_t<const wchar_t*, InputDisableScope> InputDisableScopeNames[] = {
+	{L"mods", InputDisableScope::MODS},
+	{L"all", InputDisableScope::ALL},
+
+	{NULL, InputDisableScope::INVALID} // End of list marker
+};
+
 struct Globals
 {
 	bool gInitialized;
@@ -404,9 +425,11 @@ struct Globals
 	bool gReloadConfigPending;
 	bool gConfigInitialized;
 	bool gWipeUserConfig;
-	bool gLogInput;
 	bool gShowWarnings;
 	bool dump_all_profiles;
+
+	bool auto_clear_persist_vars;
+	uint32_t unknown_persist_vars_count;
 
 	uint64_t ticks_at_launch;
 	uint64_t gSystemTickCount;
@@ -511,12 +534,15 @@ struct Globals
 	bool hide_cursor;
 	bool cursor_upscaling_bypass;
 	bool check_foreground_window;
+	InputDisableScope input_disable_scope;
+	bool disable_input;
 	int gDllInitializationDelay;
 	int gSettingsAutoSaveInterval;
 	int gConfigInitializationDelay;
 	bool gSkipEarlyIncludesLoad;
 	int gFallbackScreenWidth;
 	int gFallbackScreenHeight;
+	bool gForceDetectColorSpace;
 
 	CRITICAL_SECTION mCriticalSection;
 
@@ -703,6 +729,8 @@ struct Globals
 		hide_cursor(false),
 		cursor_upscaling_bypass(true),
 		check_foreground_window(false),
+		disable_input(false),
+		input_disable_scope(InputDisableScope::INVALID),
 
 		GAME_INTERNAL_WIDTH(1), // it gonna be used by mouse pos hook in case of softwaremouse is on and it can be called before
 		GAME_INTERNAL_HEIGHT(1),//  the swap chain is created and the proper data set to avoid errors in the hooked winapi functions
@@ -733,7 +761,6 @@ struct Globals
 		gConfigInitialized(false),
 		gWipeUserConfig(false),
 		user_config_dirty(0),
-		gLogInput(false),
 		gShowWarnings(true),
 		gDllInitializationDelay(0),
 		gSettingsAutoSaveInterval(0),
@@ -741,7 +768,10 @@ struct Globals
 		gSkipEarlyIncludesLoad(true),
 		gFallbackScreenWidth(0),
 		gFallbackScreenHeight(0),
+		gForceDetectColorSpace(false),
 		dump_all_profiles(false),
+		auto_clear_persist_vars(true),
+		unknown_persist_vars_count(0),
 		gSystemTickCount(0),
 		gTime(0),
 		gFrameTime(0)
