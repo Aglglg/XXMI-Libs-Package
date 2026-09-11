@@ -449,7 +449,7 @@ struct Globals
 	int load_library_redirect;
 
 	std::wstring user_config;
-	int user_config_dirty;
+	bool user_config_dirty;
 
 	EnableHooks enable_hooks;
 	
@@ -760,7 +760,7 @@ struct Globals
 		gReloadConfigPending(false),
 		gConfigInitialized(false),
 		gWipeUserConfig(false),
-		user_config_dirty(0),
+		user_config_dirty(false),
 		gShowWarnings(true),
 		gDllInitializationDelay(0),
 		gSettingsAutoSaveInterval(0),
