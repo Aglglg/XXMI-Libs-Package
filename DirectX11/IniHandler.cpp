@@ -366,16 +366,16 @@ static bool get_namespaced_section_path(const wchar_t *section, wstring *ret)
 
 static void ParseIniSectionLine(wstring *wline, wstring *section,
 		int *warn_duplicates, bool *warn_lines_without_equals,
-		IniSectionVector **section_vector, const wstring *ini_namespace,
+		IniSection **section_entry, const wstring *ini_namespace,
 		const wstring *ini_path)
 {
 	bool allow_duplicate_sections = false;
 	size_t first, last;
-	bool inserted;
 	bool namespaced_section = false;
 
 	*warn_duplicates = 1;
 	*warn_lines_without_equals = true;
+	*section_entry = NULL;
 
 	// To match the behaviour of GetPrivateProfileString, we use up until
 	// the first ] as the section name. If there is no ] character, we use
@@ -416,29 +416,30 @@ static void ParseIniSectionLine(wstring *wline, wstring *section,
 	// key matches, which would have to be handled elsewhere.  For now,
 	// continue warning about duplicate sections and match the old
 	// behaviour.
-	inserted = ini_sections.emplace(*section, IniSection{}).second;
-	if (!inserted && !allow_duplicate_sections) {
+	// the behaviour of GetPrivateProfileString.
+	std::pair<IniSections::iterator, bool> result = ini_sections.emplace(*section, IniSection{});
+
+	if (!result.second && !allow_duplicate_sections) {
 		IniWarningW(L"Duplicate section found\n - [%ls]\n", section->c_str());
 		section->clear();
-		*section_vector = NULL;
 		return;
 	}
 
-	*section_vector = &ini_sections[*section].kv_vec;
+	IniSection* entry = &result.first->second;
+	*section_entry = entry;
 
 	// Record the namespace so we can use it later when looking up any
 	// referenced sections. Only for namespaced sections, not global
 	// sections:
 	if (namespaced_section) {
-		ini_sections[*section].ini_namespace = *ini_namespace;
+		entry->ini_namespace = *ini_namespace;
 		if (*ini_path != *ini_namespace)
-			ini_sections[*section].ini_path = *ini_path;
+			entry->ini_path = *ini_path;
 	}
 
 	// Sections that utilise a command list are allowed to have duplicate
 	// keys, while other sections are not. The command list parser will
-	// still check for duplicate keys that are not part of the command
-	// list.
+	// still check for duplicate keys that are not part of the command list.
 	if (IsCommandListSection(section->c_str())) {
 		if (*warn_duplicates == 1)
 			*warn_duplicates = 0;
@@ -509,13 +510,13 @@ static bool ParseIniPreamble(wstring *wline, wstring *ini_namespace)
 
 static void ParseIniKeyValLine(wstring *wline, wstring *section,
 		int warn_duplicates, bool warn_lines_without_equals,
-		IniSectionVector *section_vector, const wstring *ini_namespace)
+		IniSection *section_entry, const wstring *ini_namespace)
 {
 	size_t first, last, delim;
 	wstring key, val;
 	bool inserted;
 
-	if (section->empty() || section_vector == NULL) {
+	if (section->empty() || section_entry == NULL) {
 		IniWarningW(L"Entry outside of section: %ls\n - [%ls]\n", wline->c_str(), ini_namespace->c_str());
 		return;
 	}
@@ -527,6 +528,7 @@ static void ParseIniKeyValLine(wstring *wline, wstring *section,
 		last = wline->find_last_not_of(L" \t", delim - 1);
 		key = wline->substr(0, last + 1);
 		first = wline->find_first_not_of(L" \t", delim + 1);
+
 		if (first != wline->npos)
 			val = wline->substr(first);
 		else {
@@ -537,16 +539,13 @@ static void ParseIniKeyValLine(wstring *wline, wstring *section,
 		if (warn_duplicates == 2) {
 			// Recursively loaded config files are permitted to
 			// override values from the main d3dx.ini:
-			ini_sections.at(*section).kv_map[key] = val;
+			section_entry->kv_map[key] = val;
 		} else {
-			// We use "at" on the sections to access an existing
-			// section (alternatively we could use the [] operator
-			// to permit it to be created if it doesn't exist), but
-			// we use emplace within the section so that only the
-			// first item with a given key is inserted to match the
-			// behaviour of GetPrivateProfileString for duplicate
-			// keys within a single section:
-			inserted = ini_sections.at(*section).kv_map.emplace(key, val).second;
+			// Only the first item with a given key is inserted to
+			// match the behaviour of GetPrivateProfileString for
+			// duplicate keys within a single section:
+			inserted = section_entry->kv_map.emplace(key, val).second;
+
 			if ((warn_duplicates == 1) && !inserted && !whitelisted_duplicate_key(section->c_str(), key.c_str())) {
 				IniWarningW(L"Duplicate key found: %ls\n - [%ls] @ [%ls]\n", key.c_str(), section->c_str(), ini_namespace->c_str());
 			}
@@ -562,15 +561,19 @@ static void ParseIniKeyValLine(wstring *wline, wstring *section,
 		}
 	}
 
-	section_vector->emplace_back(key, val, *wline, *ini_namespace);
+	section_entry->kv_vec.emplace_back(key, val, *wline, *ini_namespace);
 }
 
 static void ParseIniStream(wistream *stream, const wstring *_ini_namespace)
 {
 	string aline;
 	wstring wline, section, ini_path;
+
 	size_t first, last;
+	size_t line_start = 0;
 	IniSectionVector *section_vector = NULL;
+	IniSection* section_entry = NULL;
+
 	int warn_duplicates = 1;
 	bool warn_lines_without_equals = true;
 	wstring ini_namespace;
@@ -611,7 +614,7 @@ static void ParseIniStream(wistream *stream, const wstring *_ini_namespace)
 			preamble = false;
 			ParseIniSectionLine(&wline, &section, &warn_duplicates,
 					    &warn_lines_without_equals,
-					    &section_vector, &ini_namespace,
+					    &section_entry, &ini_namespace,
 					    &ini_path);
 			continue;
 		}
@@ -623,7 +626,7 @@ static void ParseIniStream(wistream *stream, const wstring *_ini_namespace)
 		}
 
 		ParseIniKeyValLine(&wline, &section, warn_duplicates,
-				   warn_lines_without_equals, section_vector,
+				   warn_lines_without_equals, section_entry,
 				   &ini_namespace);
 	}
 }
@@ -1507,7 +1510,7 @@ static void ParseIncludedIniFiles()
 {
 	IniSections include_sections;
 	IniSections::iterator lower, upper, i;
-	const wchar_t *section_id;
+	const wstring *section_id;
 	IniSectionVector *section = NULL;
 	IniSectionVector::iterator entry;
 	wstring *key, *val;
@@ -1544,15 +1547,17 @@ static void ParseIncludedIniFiles()
 		ini_sections.erase(lower, upper);
 
 		for (i = include_sections.begin(); i != include_sections.end(); i++) {
-			section_id = i->first.c_str();
-			LogInfo("[%S]\n", section_id);
+			section_id = &i->first;
+			LogInfo("[%S]\n", section_id->c_str());
 
-			_get_namespaced_section_path(&include_sections, i->first.c_str(), &namespace_path);
+			_get_namespaced_section_path(&include_sections, section_id->c_str(), &namespace_path);
 
-			_GetIniSection(&include_sections, &section, section_id);
+			_GetIniSection(&include_sections, &section, section_id->c_str());
+
 			for (entry = section->begin(); entry < section->end(); entry++) {
 				key = &entry->first;
 				val = &entry->second;
+
 				LogInfo("  %S=%S\n", key->c_str(), val->c_str());
 
 				rel_path = namespace_path + *val;
@@ -1560,24 +1565,47 @@ static void ParseIncludedIniFiles()
 				// This is not a strong protection against including the same file multiple times,
 				// but it is intended to ensure that this do while loop will eventually terminate.
 				if (seen.count(rel_path)) {
-					IniWarningW(L"File included multiple times: %ls\n - [%ls]\n", rel_path.c_str(), section_id);
+					IniWarningW(L"File included multiple times: %ls\n - [%ls]\n", rel_path.c_str(), section_id->c_str());
 					continue;
 				}
+
 				seen.insert(rel_path);
 
-				if (!wcscmp(key->c_str(), L"include")) {
-					ini_path = wstring(migoto_path) + rel_path;
-					ParseNamespacedIniFile(ini_path.c_str(), &rel_path);
-				} else if (!wcscmp(key->c_str(), L"include_recursive")) {
-					recursive_includes.insert(*val);
-					ParseIniFilesRecursive(migoto_path, rel_path, exclude);
-				} else if (!wcscmp(key->c_str(), L"exclude_recursive")) {
-					// Handled above
-				} else if (!wcscmp(key->c_str(), L"user_config")) {
-					// Handled below
-				} else {
-					IniWarningW(L"Unrecognised entry: %ls=%ls\n - [%ls] @ [%ls]\n", key->c_str(), val->c_str(), section_id, namespace_path.c_str());
+				switch (key->size())
+				{
+				case 7: // include
+					if (!wcscmp(key->c_str(), L"include")) {
+						ini_path = wstring(migoto_path) + rel_path;
+						ParseNamespacedIniFile(ini_path.c_str(), &rel_path);
+						continue;
+					}
+					break;
+
+				case 11: // user_config
+					if (!wcscmp(key->c_str(), L"user_config")) {
+						// Handled below
+						continue;
+					}
+					break;
+
+				case 17: // include_recursive / exclude_recursive
+					if (key->c_str()[0] == L'i') {
+						if (!wcscmp(key->c_str(), L"include_recursive")) {
+							ParseIniFilesRecursive(migoto_path, rel_path, exclude);
+							continue;
+						}
+					}
+					else if (key->c_str()[0] == L'e') {
+						if (!wcscmp(key->c_str(), L"exclude_recursive")) {
+							// Handled above
+							continue;
+						}
+					}
+					break;
 				}
+
+				IniWarningW(L"Unrecognised entry: %ls=%ls\n - [%ls] @ [%ls]\n",
+					key->c_str(), val->c_str(), section_id->c_str(), namespace_path.c_str());
 			}
 		}
 	} while (!include_sections.empty());
@@ -2184,20 +2212,20 @@ static bool ParseCommandListLine(const wchar_t *ini_section,
 		CommandList *post_command_list,
 		const wstring *ini_namespace)
 {
+	if (ParseCommandListVariableAssignment(ini_section, lhs, rhs, raw_line, command_list, pre_command_list, post_command_list, ini_namespace))
+		return true;
+
+	if (raw_line && !explicit_command_list &&
+		ParseCommandListFlowControl(ini_section, raw_line, pre_command_list, post_command_list, ini_namespace))
+		return true;
+
 	if (ParseCommandListGeneralCommands(ini_section, lhs, rhs, explicit_command_list, pre_command_list, post_command_list, ini_namespace))
 		return true;
 
 	if (ParseCommandListIniParamOverride(ini_section, lhs, rhs, command_list, ini_namespace))
 		return true;
 
-	if (ParseCommandListVariableAssignment(ini_section, lhs, rhs, raw_line, command_list, pre_command_list, post_command_list, ini_namespace))
-		return true;
-
 	if (ParseCommandListResourceCopyTargetDirective(ini_section, lhs, rhs, command_list, ini_namespace))
-		return true;
-
-	if (raw_line && !explicit_command_list &&
-			ParseCommandListFlowControl(ini_section, raw_line, pre_command_list, post_command_list, ini_namespace))
 		return true;
 
 	return false;
