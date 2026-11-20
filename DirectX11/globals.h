@@ -493,6 +493,7 @@ struct Globals
 	wchar_t ANALYSIS_PATH[MAX_PATH];
 	FrameAnalysisOptions def_analyse_options, cur_analyse_options;
 	std::unordered_set<void*> frame_analysis_seen_rts;
+	bool dump_mips = true;
 
 	ShaderHashType shader_hash_type;
 	bool track_region_hashes;
@@ -500,6 +501,8 @@ struct Globals
 	bool track_implicit_index_buffers;
 	bool allow_buffer_resize;
 	int texture_hash_version;
+	int dhash_mip_size = 0;
+	bool dhash_allow_rehash = false;
 	int EXPORT_HLSL;		// 0=off, 1=HLSL only, 2=HLSL+OriginalASM, 3= HLSL+OriginalASM+recompiledASM
 	bool EXPORT_SHADERS, EXPORT_FIXED, EXPORT_BINARY, CACHE_SHADERS, SCISSOR_DISABLE;
 	int track_texture_updates;

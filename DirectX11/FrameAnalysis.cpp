@@ -217,9 +217,10 @@ void FrameAnalysisContext::FrameAnalysisLogShaderHash(ID3D11Shader *shader)
 	fprintf(frame_analysis_log, "\n");
 }
 
-void FrameAnalysisContext::FrameAnalysisLogResourceHashInline(ID3D11Resource *resource)
+void FrameAnalysisContext::FrameAnalysisLogResourceHashInline(ID3D11Resource *resource, ID3D11View* view)
 {
 	uint32_t hash, orig_hash;
+	struct ResourceHandleInfo *handle;
 	struct ResourceHashInfo *info;
 
 	if (!G->analyse_frame || !frame_analysis_log || !resource)
@@ -229,8 +230,10 @@ void FrameAnalysisContext::FrameAnalysisLogResourceHashInline(ID3D11Resource *re
 	EnterCriticalSectionPretty(&G->mResourcesLock);
 
 	try {
-		hash = G->mResources.at(resource).hash;
-		orig_hash = G->mResources.at(resource).orig_hash;
+		handle = &G->mResources.at(resource);
+
+		hash = handle->hash;
+		orig_hash = handle->orig_hash;
 		if (hash)
 			fprintf(frame_analysis_log, " hash=%08x", hash);
 		if (orig_hash != hash)
@@ -248,6 +251,11 @@ void FrameAnalysisContext::FrameAnalysisLogResourceHashInline(ID3D11Resource *re
 			if (!info->region_contamination.empty())
 				fprintf(frame_analysis_log, "UpdateSubresourceRegion,");
 		}
+
+		uint64_t dhash = 0;
+		if (GetDhash(this, resource, G->dhash_mip_size, G->dhash_allow_rehash, dhash, view))
+			fprintf(frame_analysis_log, " dhash=%016llx", dhash);
+
 	} catch (std::out_of_range) {
 	}
 
@@ -255,7 +263,7 @@ void FrameAnalysisContext::FrameAnalysisLogResourceHashInline(ID3D11Resource *re
 	LeaveCriticalSection(&G->mCriticalSection);
 }
 
-void FrameAnalysisContext::FrameAnalysisLogResourceHash(ID3D11Resource* resource)
+void FrameAnalysisContext::FrameAnalysisLogResourceHash(ID3D11Resource* resource, ID3D11View* view)
 {
 	// Always complete the line in the debug log:
 	LogDebug("\n");
@@ -263,12 +271,12 @@ void FrameAnalysisContext::FrameAnalysisLogResourceHash(ID3D11Resource* resource
 	if (!G->analyse_frame || !frame_analysis_log)
 		return;
 
-	FrameAnalysisLogResourceHashInline(resource);
+	FrameAnalysisLogResourceHashInline(resource, view);
 
 	fprintf(frame_analysis_log, "\n");
 }
 
-void FrameAnalysisContext::FrameAnalysisLogResource(int slot, char *slot_name, ID3D11Resource *resource)
+void FrameAnalysisContext::FrameAnalysisLogResource(int slot, char *slot_name, ID3D11Resource *resource, ID3D11View* view)
 {
 	if (!resource || !G->analyse_frame || !frame_analysis_log)
 		return;
@@ -276,7 +284,7 @@ void FrameAnalysisContext::FrameAnalysisLogResource(int slot, char *slot_name, I
 	FrameAnalysisLogSlot(frame_analysis_log, slot, slot_name);
 	fprintf(frame_analysis_log, " resource=0x%p", resource);
 
-	FrameAnalysisLogResourceHash(resource);
+	FrameAnalysisLogResourceHash(resource, view);
 }
 
 void FrameAnalysisContext::FrameAnalysisLogView(int slot, char *slot_name, ID3D11View *view)
@@ -293,7 +301,7 @@ void FrameAnalysisContext::FrameAnalysisLogView(int slot, char *slot_name, ID3D1
 	if (!resource)
 		return;
 
-	FrameAnalysisLogResource(-1, NULL, resource);
+	FrameAnalysisLogResource(-1, NULL, resource, view);
 
 	resource->Release();
 }
@@ -553,7 +561,7 @@ void FrameAnalysisContext::Dump2DResourceImmediateCtx(ID3D11Texture2D *staging,
 
 		hr = S_OK;
 		if (GetFileAttributes(save_filename.c_str()) == INVALID_FILE_ATTRIBUTES)
-			hr = DirectX::SaveDDSTextureToFile(GetDumpingContext(), staging, save_filename.c_str());
+			hr = DirectX::SaveDDSTextureToFile(GetDumpingContext(), staging, save_filename.c_str(), G->dump_mips);
 		link_deduplicated_files(filename.c_str(), save_filename.c_str());
 	}
 
@@ -2365,7 +2373,7 @@ void FrameAnalysisContext::_DumpCBs(char shader_type, bool compute,
 }
 
 void FrameAnalysisContext::_DumpTextures(char shader_type, bool compute,
-	ID3D11ShaderResourceView *views[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT])
+	ID3D11ShaderResourceView *views[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT], const ShaderBindings* bindings)
 {
 	ID3D11Resource *resource;
 	D3D11_SHADER_RESOURCE_VIEW_DESC view_desc;
@@ -2379,6 +2387,12 @@ void FrameAnalysisContext::_DumpTextures(char shader_type, bool compute,
 
 		if (i == G->IniParamsReg) {
 			FALogInfo(L"Skipped 3DMigoto resource in slot %Cs-t%i\n", shader_type, i);
+			continue;
+		}
+
+		if (bindings && bindings->resources[i].type == ShaderResourceType::NONE) {
+			FALogInfo(L"Skipped undeclared resource in slot %Cs-t%i\n", shader_type, i);
+			views[i]->Release();
 			continue;
 		}
 
@@ -2584,28 +2598,32 @@ void FrameAnalysisContext::DumpTextures(bool compute)
 	if (compute) {
 		if (mCurrentComputeShader) {
 			GetPassThroughOrigContext1()->CSGetShaderResources(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT, views);
-			_DumpTextures('c', compute, views);
+			_DumpTextures('c', compute, views, nullptr);
 		}
 	} else {
 		if (mCurrentVertexShader) {
 			GetPassThroughOrigContext1()->VSGetShaderResources(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT, views);
-			_DumpTextures('v', compute, views);
+			_DumpTextures('v', compute, views, nullptr);
 		}
 		if (mCurrentHullShader) {
 			GetPassThroughOrigContext1()->HSGetShaderResources(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT, views);
-			_DumpTextures('h', compute, views);
+			_DumpTextures('h', compute, views, nullptr);
 		}
 		if (mCurrentDomainShader) {
 			GetPassThroughOrigContext1()->DSGetShaderResources(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT, views);
-			_DumpTextures('d', compute, views);
+			_DumpTextures('d', compute, views, nullptr);
 		}
 		if (mCurrentGeometryShader) {
 			GetPassThroughOrigContext1()->GSGetShaderResources(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT, views);
-			_DumpTextures('g', compute, views);
+			_DumpTextures('g', compute, views, nullptr);
 		}
 		if (mCurrentPixelShader) {
+			ShaderBindings* bindings = nullptr;
+			auto it = G->mShaderBindingsCache.find(mCurrentPixelShader);
+			if (it != G->mShaderBindingsCache.end())
+				bindings = &it->second;
 			GetPassThroughOrigContext1()->PSGetShaderResources(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT, views);
-			_DumpTextures('p', compute, views);
+			_DumpTextures('p', compute, views, bindings);
 		}
 	}
 }

@@ -415,6 +415,9 @@ struct ResourceHandleInfo
 	uint32_t hash = 0;
 	uint32_t orig_hash = 0;	// Original hash at the time of creation
 	uint32_t data_hash = 0;	// Just the data hash for track_texture_updates
+	uint64_t dhash = 0;
+	uint64_t dhash_generation = 0;
+	uint64_t dhash_mip_level = (uint64_t)-1;
 
 	// Cleared on config reload, rebuilt on next lookup. The hash list is
 	// also rebuilt when track_texture_updates changes the hash:
@@ -445,6 +448,16 @@ struct ResourceHandleInfo
 		D3D11_TEXTURE3D_DESC desc3D;
 	};
 
+	// Texture subresource tracking.
+	// Indexed using D3D11CalcSubresource(mip, arraySlice, mip_levels).
+	// These are the actual dimensions of the created resource, not
+	// necessarily the values from the original creation descriptor.
+	UINT mip_levels = 0;
+	UINT array_size = 0;
+	uint64_t resource_generation = 0;
+	// One entry per subresource. Access only while G->mResourcesLock is held.
+	std::vector<uint64_t> subresource_generations;
+
 	void InitializeDataCache(size_t size, size_t offset = 0);
 	void SetDataCache(void* src, size_t size);
 	void SetDataCacheRegion(const void* src, size_t size, UINT offset);
@@ -455,6 +468,18 @@ struct ResourceHandleInfo
 
 	void CacheRegionHash(const RegionHashKeyL2& key, uint32_t hash);
 	uint32_t GetCachedRegionHash(const RegionHashKeyL2& key);
+
+	void InitializeSubresourceTracking(UINT mipLevels, UINT arraySize, bool dataUploaded = false);
+	void ProcessSubresourceUpdate(UINT subresource, bool fullSubresource, bool discard);
+	void ProcessResourceCopy(const ResourceHandleInfo* srcInfo);
+	void ProcessSubresourceCopy(UINT dstSubresource, bool sourceInitialized, bool fullDestinationSubresource, bool discard = false);
+	void ProcessGenerateMips(UINT mostDetailedMip, UINT viewMipLevels, UINT firstArraySlice, UINT viewArraySize);
+	
+	bool IsSubresourceUploaded(UINT subresource) const;
+	uint64_t GetSubresourceGeneration(UINT subresource) const;
+	UINT GetSubresourceIndex(UINT mip, UINT arraySlice = 0) const;
+
+	UINT FindOptimalMip(const D3D11_TEXTURE2D_DESC& desc, UINT min_mip_size, uint64_t min_generation);
 };
 
 struct CopySubresourceRegionContamination
@@ -618,6 +643,21 @@ UINT GetIndexBufferRegionOffset(DXGI_FORMAT format, DrawCallInfo* call_info, UIN
 UINT GetIndexBufferRegionSize(DXGI_FORMAT format, DrawCallInfo* call_info);
 UINT GetVertexBufferRegionSize(UINT stride, DrawCallInfo* call_info);
 
+void UpdateTextureSubresourceState(ID3D11Resource* resource, UINT subresource, bool fullSubresource, bool discard);
+void UpdateTextureResourceStateFromCopy(ID3D11Resource* dstResource, ID3D11Resource* srcResource);
+void UpdateTextureGenerateMipsState(ID3D11ShaderResourceView* pShaderResourceView);
+void UpdateTextureSubresourceStateFromResolve(ID3D11Resource* pDstResource, UINT DstSubresource, ID3D11Resource* pSrcResource, UINT SrcSubresource);
+void UpdateTextureSubresourceStateFromCopy(
+	ID3D11Resource* pDstResource,
+	UINT DstSubresource,
+	UINT DstX,
+	UINT DstY,
+	UINT DstZ,
+	ID3D11Resource* pSrcResource,
+	UINT SrcSubresource,
+	const D3D11_BOX* pSrcBox,
+	UINT CopyFlags = 0);
+
 float BitCastToFloat(uint32_t bits);
 uint32_t BitCastToUint(float bits);
 uint64_t HashPointer(const void* p);
@@ -635,6 +675,8 @@ uint32_t SpatialDistanceChebyshev(const GridPos& a, const GridPos& b);
 
 uint32_t GetRegionHash(HackerContext* context, ID3D11Buffer* buffer, UINT offset, UINT size, CustomResource* custom_resource = nullptr);
 uint32_t GetSpatialHash(HackerContext* context, ID3D11Buffer* buffer, UINT offset_x, UINT offset_y, UINT offset_z, float cell_size = 0.125f, CustomResource* custom_resource = nullptr);
+bool GetDhash(HackerContext* context, ID3D11Resource* resource, UINT prefer_mip_size, bool rehash_updated_mip, uint64_t& out_hash, ID3D11View* view = nullptr);
+unsigned HammingDistance(uint64_t a, uint64_t b);
 
 void MarkResourceHashContaminated(ID3D11Resource *dest, UINT DstSubresource,
 		ID3D11Resource *src, UINT srcSubresource, char type,

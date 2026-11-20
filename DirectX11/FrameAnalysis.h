@@ -90,15 +90,15 @@ class FrameAnalysisContext : public HackerContext
 private:
 	template <class ID3D11Shader>
 	void FrameAnalysisLogShaderHash(ID3D11Shader *shader);
-	void FrameAnalysisLogResourceHash(ID3D11Resource *resource);
-	void FrameAnalysisLogResource(int slot, char *slot_name, ID3D11Resource *resource);
+	void FrameAnalysisLogResourceHash(ID3D11Resource *resource, ID3D11View* view = nullptr);
+	void FrameAnalysisLogResource(int slot, char *slot_name, ID3D11Resource *resource, ID3D11View* view = nullptr);
 	void FrameAnalysisLogResourceArray(UINT start, UINT len, ID3D11Resource *const *ppResources);
 	void FrameAnalysisLogView(int slot, char *slot_name, ID3D11View *view);
 	void FrameAnalysisLogViewArray(UINT start, UINT len, ID3D11View *const *ppViews);
 	void FrameAnalysisLogMiscArray(UINT start, UINT len, void *const *array);
 	void FrameAnalysisLogAsyncQuery(ID3D11Asynchronous *async);
 	void FrameAnalysisLogData(void *buf, UINT size);
-	void FrameAnalysisLogResourceHashInline(ID3D11Resource* resource);
+	void FrameAnalysisLogResourceHashInline(ID3D11Resource* resource, ID3D11View* view = nullptr);
 	void FrameAnalysisLogConstantBuffer(int slot, char* slot_name, ID3D11Resource* resource, UINT first_constant, UINT num_constants);
 	void FrameAnalysisLogConstantBufferArray(UINT start, UINT len, ID3D11Resource* const* ppResources, const UINT* pFirstConstant, const UINT* pNumConstants);
 
@@ -159,7 +159,7 @@ private:
 	void _DumpCBs(char shader_type, bool compute,
 		ID3D11Buffer *buffers[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT]);
 	void _DumpTextures(char shader_type, bool compute,
-		ID3D11ShaderResourceView *views[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT]);
+		ID3D11ShaderResourceView *views[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT], const ShaderBindings* bindings);
 	void DumpCBs(bool compute);
 	void DumpVBs(DrawCallInfo *call_info, ID3D11Buffer *staged_ib, DXGI_FORMAT ib_fmt, UINT ib_off);
 	void DumpIB(DrawCallInfo *call_info, ID3D11Buffer **staged_ib, DXGI_FORMAT *format, UINT *offset);
